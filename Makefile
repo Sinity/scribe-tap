@@ -11,6 +11,9 @@ BIN := scribe-tap
 
 all: $(BIN)
 
+check: $(BIN)
+	python3 tests/test_basic.py
+
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
