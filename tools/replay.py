@@ -25,8 +25,12 @@ def load_events(log_path: Path) -> Iterable[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log-dir", type=Path, default=Path("/realm/data/keylog/logs"))
-    parser.add_argument("--date", type=str, help="Date (YYYY-MM-DD)",
-                        default=dt.datetime.utcnow().date().isoformat())
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Date (YYYY-MM-DD)",
+        default=dt.datetime.now(dt.timezone.utc).date().isoformat(),
+    )
     parser.add_argument("--window", type=str, help="Filter window substring")
     parser.add_argument("--show-keys", action="store_true", help="Print key trail")
     parser.add_argument("--tail", type=int, default=20, help="Tail length for key trail")
@@ -55,7 +59,7 @@ def main() -> None:
         print(buffer.rstrip("\n") or "<empty>")
         print("---")
 
-    if args.show-keys:
+    if args.show_keys:
         trail = [
             (ev.get("ts"), ev.get("window"), ev.get("keycode"))
             for ev in events
