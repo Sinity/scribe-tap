@@ -1,0 +1,8 @@
+/build/
+/result
+scribe-tap
+*.o
+*.gcda
+*.gcno
+*.gcov
+.DS_Store
