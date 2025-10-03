@@ -258,6 +258,7 @@ struct State {
     double snapshot_interval;
     double context_refresh;
     enum ClipboardMode clipboard_mode;
+    bool context_enabled;
 
     FILE *log_file;
     struct BufferList buffers;
@@ -395,6 +396,13 @@ static void extract_json_field(const char *json, const char *field, char *out, s
 
 static void update_context(struct State *state) {
     double now = now_seconds();
+    if (!state->context_enabled) {
+        if (state->current_context[0] == '\0') {
+            strncpy(state->current_context, "global", sizeof(state->current_context));
+            state->current_context[sizeof(state->current_context) - 1] = '\0';
+        }
+        return;
+    }
     if (now - state->last_context_poll < state->context_refresh) {
         return;
     }
@@ -438,6 +446,7 @@ static void update_context(struct State *state) {
 }
 
 static const char *keycode_name(int code) {
+    static char buf[32];
     switch (code) {
         case KEY_ESC: return "KEY_ESC";
         case KEY_ENTER: return "KEY_ENTER";
@@ -446,9 +455,16 @@ static const char *keycode_name(int code) {
         case KEY_SPACE: return "KEY_SPACE";
         case KEY_CAPSLOCK: return "KEY_CAPSLOCK";
         default:
-            ;
+            break;
     }
-    static char buf[32];
+    if (code >= KEY_A && code <= KEY_Z) {
+        snprintf(buf, sizeof(buf), "KEY_%c", 'A' + (code - KEY_A));
+        return buf;
+    }
+    if (code >= KEY_0 && code <= KEY_9) {
+        snprintf(buf, sizeof(buf), "KEY_%c", '0' + (code - KEY_0));
+        return buf;
+    }
     snprintf(buf, sizeof(buf), "KEY_%d", code);
     return buf;
 }
@@ -650,7 +666,8 @@ static void init_state(struct State *state,
                        const char *hyprctl_cmd,
                        double snapshot_interval,
                        double context_refresh,
-                       enum ClipboardMode clipboard_mode) {
+                       enum ClipboardMode clipboard_mode,
+                       bool context_enabled) {
     memset(state, 0, sizeof(*state));
     strncpy(state->log_dir, log_dir, sizeof(state->log_dir));
     strncpy(state->snapshot_dir, snapshot_dir, sizeof(state->snapshot_dir));
@@ -658,6 +675,7 @@ static void init_state(struct State *state,
     state->snapshot_interval = snapshot_interval;
     state->context_refresh = context_refresh;
     state->clipboard_mode = clipboard_mode;
+    state->context_enabled = context_enabled;
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -702,7 +720,8 @@ static void cleanup_state(struct State *state) {
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
-            "           [--clipboard auto|off] [--context-refresh SEC] [--hyprctl CMD]\n",
+            "           [--clipboard auto|off] [--context-refresh SEC] [--context hyprland|none]\n"
+            "           [--hyprctl CMD]\n",
             prog);
 }
 
@@ -713,6 +732,7 @@ int main(int argc, char **argv) {
     double snapshot_interval = 5.0;
     double context_refresh = 0.4;
     enum ClipboardMode clipboard_mode = CLIPBOARD_AUTO;
+    bool context_enabled = true;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
@@ -735,6 +755,16 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--hyprctl") == 0 && i + 1 < argc) {
             hyprctl_cmd = argv[++i];
+        } else if (strcmp(argv[i], "--context") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "hyprland") == 0) {
+                context_enabled = true;
+            } else if (strcmp(mode, "none") == 0) {
+                context_enabled = false;
+            } else {
+                fprintf(stderr, "Invalid context mode: %s\n", mode);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -751,7 +781,7 @@ int main(int argc, char **argv) {
     ensure_dir(snapshot_dir);
 
     struct State state;
-    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh, clipboard_mode);
+    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh, clipboard_mode, context_enabled);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
