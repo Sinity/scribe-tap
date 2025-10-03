@@ -38,6 +38,7 @@ make install prefix=$HOME/.local
 ```
 scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
            [--clipboard (auto|off)] [--context hyprland|none]
+           [--translate xkb|raw] [--xkb-layout LAYOUT] [--xkb-variant VARIANT]
            [--context-refresh SEC] [--hyprctl CMD]
 ```
 
@@ -48,6 +49,8 @@ scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
 - `--context` – `hyprland` (default) polls Hyprland for active window; `none` disables polling.
 - `--context-refresh` – minimum seconds between Hyprland window polls.
 - `--hyprctl` – override the hyprctl executable path.
+- `--translate` – `xkb` (default) uses libxkbcommon to emit UTF-8 text; `raw` falls back to direct keycode mapping.
+- `--xkb-layout` / `--xkb-variant` – pass explicit XKB names when running outside the user session (e.g. in interception-tools).
 
 Snapshots contain the current buffer for their window, making it easy to yank the most
 recent draft if a browser tab eats it. JSON logs hold the full per-key history.

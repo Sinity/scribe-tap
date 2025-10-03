@@ -16,6 +16,8 @@
         pname = "scribe-tap";
         version = "0.1.0";
         src = ./.;
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.libxkbcommon ];
         buildPhase = "make";
         installPhase = ''
           make install PREFIX=$out
@@ -38,6 +40,7 @@
           pkgs.wl-clipboard
           pkgs.xclip
           pkgs.pkg-config
+          pkgs.libxkbcommon
         ];
       };
     });

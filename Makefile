@@ -1,5 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11
+PKG_CFLAGS := $(shell pkg-config --cflags xkbcommon 2>/dev/null)
+PKG_LIBS := $(shell pkg-config --libs xkbcommon 2>/dev/null)
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
@@ -15,10 +17,10 @@ check: $(BIN)
 	python3 tests/test_basic.py
 
 $(BIN): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(PKG_LIBS) -o $@ $^
 
 src/%.o: src/%.c
-	$(CC) $(CFLAGS) -Isrc -Iinclude -c -o $@ $<
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -Isrc -Iinclude -c -o $@ $<
 
 clean:
 	rm -f $(OBJ) $(BIN)

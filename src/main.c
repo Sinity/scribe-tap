@@ -13,6 +13,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <xkbcommon/xkbcommon.h>
 
 static volatile sig_atomic_t g_should_stop = 0;
 
@@ -242,6 +243,11 @@ enum ClipboardMode {
     CLIPBOARD_OFF,
 };
 
+enum TranslateMode {
+    TRANSLATE_XKB,
+    TRANSLATE_RAW,
+};
+
 enum ModifierIndex {
     MOD_SHIFT = 0,
     MOD_CTRL,
@@ -258,7 +264,10 @@ struct State {
     double snapshot_interval;
     double context_refresh;
     enum ClipboardMode clipboard_mode;
+    enum TranslateMode translate_mode;
     bool context_enabled;
+    const char *xkb_layout;
+    const char *xkb_variant;
 
     FILE *log_file;
     struct BufferList buffers;
@@ -267,6 +276,9 @@ struct State {
 
     bool capslock;
     bool modifiers[MOD_COUNT];
+    struct xkb_context *xkb_ctx;
+    struct xkb_keymap *xkb_keymap;
+    struct xkb_state *xkb_state;
 };
 
 static void log_event(struct State *state, const char *event, const char *window,
@@ -574,7 +586,7 @@ static char *read_clipboard(enum ClipboardMode mode) {
     return clip;
 }
 
-static void process_key(struct State *state, int code, const char *key_name) {
+static void process_key(struct State *state, int code, const char *key_name, const char *utf8_text) {
     update_context(state);
 
     struct Buffer *buf = buffer_lookup(&state->buffers, state->current_context[0] ? state->current_context : "unknown", true);
@@ -614,11 +626,16 @@ static void process_key(struct State *state, int code, const char *key_name) {
                     changed = true;
                 }
             } else {
-                char c = translate_char(state, code);
-                if (c) {
-                    appended[0] = c;
-                    buffer_append(buf, appended, 1);
+                if (utf8_text && *utf8_text) {
+                    buffer_append(buf, utf8_text, strlen(utf8_text));
                     changed = true;
+                } else if (state->translate_mode == TRANSLATE_RAW) {
+                    char c = translate_char(state, code);
+                    if (c) {
+                        appended[0] = c;
+                        buffer_append(buf, appended, 1);
+                        changed = true;
+                    }
                 }
             }
             break;
@@ -667,7 +684,10 @@ static void init_state(struct State *state,
                        double snapshot_interval,
                        double context_refresh,
                        enum ClipboardMode clipboard_mode,
-                       bool context_enabled) {
+                       enum TranslateMode translate_mode,
+                       bool context_enabled,
+                       const char *xkb_layout,
+                       const char *xkb_variant) {
     memset(state, 0, sizeof(*state));
     strncpy(state->log_dir, log_dir, sizeof(state->log_dir));
     strncpy(state->snapshot_dir, snapshot_dir, sizeof(state->snapshot_dir));
@@ -675,7 +695,10 @@ static void init_state(struct State *state,
     state->snapshot_interval = snapshot_interval;
     state->context_refresh = context_refresh;
     state->clipboard_mode = clipboard_mode;
+    state->translate_mode = translate_mode;
     state->context_enabled = context_enabled;
+    state->xkb_layout = xkb_layout;
+    state->xkb_variant = xkb_variant;
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -703,6 +726,24 @@ static void init_state(struct State *state,
         perror("fopen log");
         exit(1);
     }
+
+    if (state->translate_mode == TRANSLATE_XKB) {
+        state->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+        if (state->xkb_ctx) {
+            struct xkb_rule_names names = {
+                .layout = state->xkb_layout,
+                .variant = state->xkb_variant,
+            };
+            state->xkb_keymap = xkb_keymap_new_from_names(state->xkb_ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+            if (state->xkb_keymap) {
+                state->xkb_state = xkb_state_new(state->xkb_keymap);
+            }
+        }
+        if (!state->xkb_state) {
+            state->translate_mode = TRANSLATE_RAW;
+        }
+    }
+
     log_event(state, "start", NULL, NULL, false, NULL, NULL);
 }
 
@@ -715,12 +756,16 @@ static void cleanup_state(struct State *state) {
         free(state->buffers.items[i].text);
     }
     free(state->buffers.items);
+    if (state->xkb_state) xkb_state_unref(state->xkb_state);
+    if (state->xkb_keymap) xkb_keymap_unref(state->xkb_keymap);
+    if (state->xkb_ctx) xkb_context_unref(state->xkb_ctx);
 }
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
             "           [--clipboard auto|off] [--context-refresh SEC] [--context hyprland|none]\n"
+            "           [--translate xkb|raw] [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n"
             "           [--hyprctl CMD]\n",
             prog);
 }
@@ -733,6 +778,9 @@ int main(int argc, char **argv) {
     double context_refresh = 0.4;
     enum ClipboardMode clipboard_mode = CLIPBOARD_AUTO;
     bool context_enabled = true;
+    enum TranslateMode translate_mode = TRANSLATE_XKB;
+    const char *xkb_layout = NULL;
+    const char *xkb_variant = NULL;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
@@ -765,6 +813,20 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Invalid context mode: %s\n", mode);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--translate") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "xkb") == 0) {
+                translate_mode = TRANSLATE_XKB;
+            } else if (strcmp(mode, "raw") == 0) {
+                translate_mode = TRANSLATE_RAW;
+            } else {
+                fprintf(stderr, "Invalid translate mode: %s\n", mode);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--xkb-layout") == 0 && i + 1 < argc) {
+            xkb_layout = argv[++i];
+        } else if (strcmp(argv[i], "--xkb-variant") == 0 && i + 1 < argc) {
+            xkb_variant = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -781,7 +843,7 @@ int main(int argc, char **argv) {
     ensure_dir(snapshot_dir);
 
     struct State state;
-    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh, clipboard_mode, context_enabled);
+    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh, clipboard_mode, translate_mode, context_enabled, xkb_layout, xkb_variant);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -805,9 +867,22 @@ int main(int argc, char **argv) {
 
         if (ev.type == EV_KEY) {
             const char *name = keycode_name(ev.code);
+            if (state.translate_mode == TRANSLATE_XKB && state.xkb_state) {
+                enum xkb_key_direction dir = (ev.value == 0) ? XKB_KEY_UP : XKB_KEY_DOWN;
+                xkb_state_update_key(state.xkb_state, ev.code + 8, dir);
+            }
             if (ev.value == 1 || ev.value == 2) {
                 update_modifiers(&state, ev.code, true);
-                process_key(&state, ev.code, name);
+                const char *text_ptr = NULL;
+                char utf8_buf[64];
+                if (state.translate_mode == TRANSLATE_XKB && state.xkb_state) {
+                    int len = xkb_state_key_get_utf8(state.xkb_state, ev.code + 8, utf8_buf, sizeof utf8_buf);
+                    if (len > 0) {
+                        utf8_buf[len] = '\0';
+                        text_ptr = utf8_buf;
+                    }
+                }
+                process_key(&state, ev.code, name, text_ptr);
             } else if (ev.value == 0) {
                 update_modifiers(&state, ev.code, false);
             }
