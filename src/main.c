@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <limits.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,6 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <xkbcommon/xkbcommon.h>
+#include <ctype.h>
 
 static volatile sig_atomic_t g_should_stop = 0;
 
@@ -79,6 +81,62 @@ static char *string_dup(const char *src) {
         exit(1);
     }
     return dup;
+}
+
+static void rstrip_whitespace(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    while (len && isspace((unsigned char)s[len - 1])) {
+        s[--len] = '\0';
+    }
+}
+
+static char *read_trimmed_file(const char *path) {
+    if (!path) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t len = getline(&line, &cap, f);
+    fclose(f);
+    if (len <= 0) {
+        free(line);
+        return NULL;
+    }
+    rstrip_whitespace(line);
+    return line;
+}
+
+static char *load_hypr_signature_for_user(const char *user) {
+    if (!user) return NULL;
+    struct passwd *pw = getpwnam(user);
+    if (!pw) return NULL;
+    const uid_t uid = pw->pw_uid;
+    char path[PATH_MAX];
+    const char *home = pw->pw_dir;
+    const char *home_candidates[] = {
+        "%s/.cache/hyprland/instance",
+        "%s/.cache/hyprland/hyprland_instance",
+        "%s/.cache/hyprland/hyprland.conf-instance",
+    };
+    for (size_t i = 0; i < sizeof(home_candidates)/sizeof(home_candidates[0]); ++i) {
+        if (!home) break;
+        snprintf(path, sizeof(path), home_candidates[i], home);
+        char *value = read_trimmed_file(path);
+        if (value && *value) return value;
+        free(value);
+    }
+    const char *runtime_candidates[] = {
+        "/run/user/%u/hypr/instance",
+        "/run/user/%u/hypr/hyprland_instance",
+    };
+    for (size_t i = 0; i < sizeof(runtime_candidates)/sizeof(runtime_candidates[0]); ++i) {
+        snprintf(path, sizeof(path), runtime_candidates[i], uid);
+        char *value = read_trimmed_file(path);
+        if (value && *value) return value;
+        free(value);
+    }
+    return NULL;
 }
 
 static void sanitize_slug(char *s) {
@@ -248,6 +306,12 @@ enum TranslateMode {
     TRANSLATE_RAW,
 };
 
+enum LogMode {
+    LOG_MODE_EVENTS,
+    LOG_MODE_SNAPSHOTS,
+    LOG_MODE_BOTH,
+};
+
 enum ModifierIndex {
     MOD_SHIFT = 0,
     MOD_CTRL,
@@ -265,6 +329,7 @@ struct State {
     double context_refresh;
     enum ClipboardMode clipboard_mode;
     enum TranslateMode translate_mode;
+    enum LogMode log_mode;
     bool context_enabled;
     const char *xkb_layout;
     const char *xkb_variant;
@@ -279,12 +344,17 @@ struct State {
     struct xkb_context *xkb_ctx;
     struct xkb_keymap *xkb_keymap;
     struct xkb_state *xkb_state;
+    char *hypr_signature;
 };
 
 static void log_event(struct State *state, const char *event, const char *window,
                       const char *keycode, bool changed, const char *buffer_text,
                       const char *clipboard_text) {
     if (!state->log_file) return;
+    bool is_press = (event && strcmp(event, "press") == 0);
+    bool is_snapshot = (event && strcmp(event, "snapshot") == 0);
+    if (is_press && state->log_mode == LOG_MODE_SNAPSHOTS) return;
+    if (is_snapshot && state->log_mode == LOG_MODE_EVENTS) return;
     char ts[64];
     iso8601(ts, sizeof(ts));
 
@@ -301,7 +371,7 @@ static void log_event(struct State *state, const char *event, const char *window
         fprintf(state->log_file, ",\"keycode\":\"%s\"", keycode);
     }
     fprintf(state->log_file, ",\"changed\":%s", changed ? "true" : "false");
-    if (buffer_text) {
+    if (is_snapshot && buffer_text) {
         char *buffer_json = json_escape(buffer_text);
         fprintf(state->log_file, ",\"buffer\":%s", buffer_json);
         free(buffer_json);
@@ -316,6 +386,9 @@ static void log_event(struct State *state, const char *event, const char *window
 }
 
 static void write_snapshot(struct State *state, struct Buffer *buf, bool force) {
+    if (state->log_mode == LOG_MODE_EVENTS) {
+        return;
+    }
     double now = now_seconds();
     if (!force && now - buf->last_snapshot < state->snapshot_interval) {
         return;
@@ -420,8 +493,13 @@ static void update_context(struct State *state) {
     }
     state->last_context_poll = now;
 
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "%s activewindow -j", state->hyprctl_cmd);
+    char cmd[256];
+    if (state->hypr_signature && *state->hypr_signature) {
+        snprintf(cmd, sizeof(cmd), "%s --instance %s activewindow -j",
+                 state->hyprctl_cmd, state->hypr_signature);
+    } else {
+        snprintf(cmd, sizeof(cmd), "%s activewindow -j", state->hyprctl_cmd);
+    }
     char *json = read_command_output(cmd);
     if (!json) return;
 
@@ -646,7 +724,9 @@ static void process_key(struct State *state, int code, const char *key_name, con
         write_snapshot(state, buf, force_snapshot);
     }
 
-    log_event(state, "press", buf->context, key_name, changed, buf->text, clipboard);
+    if (state->log_mode != LOG_MODE_SNAPSHOTS) {
+        log_event(state, "press", buf->context, key_name, changed, NULL, clipboard);
+    }
 
     free(clipboard);
 }
@@ -685,9 +765,12 @@ static void init_state(struct State *state,
                        double context_refresh,
                        enum ClipboardMode clipboard_mode,
                        enum TranslateMode translate_mode,
+                       enum LogMode log_mode,
                        bool context_enabled,
                        const char *xkb_layout,
-                       const char *xkb_variant) {
+                       const char *xkb_variant,
+                       const char *hypr_signature_path,
+                       const char *hypr_user) {
     memset(state, 0, sizeof(*state));
     strncpy(state->log_dir, log_dir, sizeof(state->log_dir));
     strncpy(state->snapshot_dir, snapshot_dir, sizeof(state->snapshot_dir));
@@ -696,9 +779,22 @@ static void init_state(struct State *state,
     state->context_refresh = context_refresh;
     state->clipboard_mode = clipboard_mode;
     state->translate_mode = translate_mode;
+    state->log_mode = log_mode;
     state->context_enabled = context_enabled;
     state->xkb_layout = xkb_layout;
     state->xkb_variant = xkb_variant;
+    state->hypr_signature = NULL;
+
+    if (hypr_signature_path) {
+        state->hypr_signature = read_trimmed_file(hypr_signature_path);
+    } else if (hypr_user) {
+        state->hypr_signature = load_hypr_signature_for_user(hypr_user);
+    } else {
+        const char *env_sig = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+        if (env_sig && *env_sig) {
+            state->hypr_signature = string_dup(env_sig);
+        }
+    }
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -759,14 +855,16 @@ static void cleanup_state(struct State *state) {
     if (state->xkb_state) xkb_state_unref(state->xkb_state);
     if (state->xkb_keymap) xkb_keymap_unref(state->xkb_keymap);
     if (state->xkb_ctx) xkb_context_unref(state->xkb_ctx);
+    free(state->hypr_signature);
 }
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
             "           [--clipboard auto|off] [--context-refresh SEC] [--context hyprland|none]\n"
-            "           [--translate xkb|raw] [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n"
-            "           [--hyprctl CMD]\n",
+            "           [--log-mode events|snapshots|both] [--translate xkb|raw]\n"
+            "           [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n"
+            "           [--hyprctl CMD] [--hypr-signature PATH] [--hypr-user USER]\n",
             prog);
 }
 
@@ -779,8 +877,11 @@ int main(int argc, char **argv) {
     enum ClipboardMode clipboard_mode = CLIPBOARD_AUTO;
     bool context_enabled = true;
     enum TranslateMode translate_mode = TRANSLATE_XKB;
+    enum LogMode log_mode = LOG_MODE_BOTH;
     const char *xkb_layout = NULL;
     const char *xkb_variant = NULL;
+    const char *hypr_signature_path = NULL;
+    const char *hypr_user = NULL;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
@@ -813,6 +914,18 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Invalid context mode: %s\n", mode);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--log-mode") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (strcmp(mode, "events") == 0) {
+                log_mode = LOG_MODE_EVENTS;
+            } else if (strcmp(mode, "snapshots") == 0) {
+                log_mode = LOG_MODE_SNAPSHOTS;
+            } else if (strcmp(mode, "both") == 0) {
+                log_mode = LOG_MODE_BOTH;
+            } else {
+                fprintf(stderr, "Invalid log mode: %s\n", mode);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--translate") == 0 && i + 1 < argc) {
             const char *mode = argv[++i];
             if (strcmp(mode, "xkb") == 0) {
@@ -827,6 +940,10 @@ int main(int argc, char **argv) {
             xkb_layout = argv[++i];
         } else if (strcmp(argv[i], "--xkb-variant") == 0 && i + 1 < argc) {
             xkb_variant = argv[++i];
+        } else if (strcmp(argv[i], "--hypr-signature") == 0 && i + 1 < argc) {
+            hypr_signature_path = argv[++i];
+        } else if (strcmp(argv[i], "--hypr-user") == 0 && i + 1 < argc) {
+            hypr_user = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -843,7 +960,9 @@ int main(int argc, char **argv) {
     ensure_dir(snapshot_dir);
 
     struct State state;
-    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh, clipboard_mode, translate_mode, context_enabled, xkb_layout, xkb_variant);
+    init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh,
+               clipboard_mode, translate_mode, log_mode, context_enabled, xkb_layout, xkb_variant,
+               hypr_signature_path, hypr_user);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
