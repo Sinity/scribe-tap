@@ -52,7 +52,7 @@ scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
 Snapshots contain the current buffer for their window, making it easy to yank the most
 recent draft if a browser tab eats it. JSON logs hold the full per-key history.
 
-Use the included replay helper to inspect logs:
+Use the included replay helper to inspect logs (`scribe-tap-replay` when installed via Nix):
 
 ```sh
 python3 tools/replay.py --log-dir /realm/data/keylog/logs --window messenger

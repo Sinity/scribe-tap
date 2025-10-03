@@ -19,6 +19,7 @@
         buildPhase = "make";
         installPhase = ''
           make install PREFIX=$out
+          install -D -m 0755 tools/replay.py $out/bin/scribe-tap-replay
         '';
         meta = with pkgs.lib; {
           description = "Keystroke mirror for interception-tools on Hyprland";
