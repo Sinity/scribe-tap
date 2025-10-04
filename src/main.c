@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <pwd.h>
+#include <dirent.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -64,6 +65,26 @@ static void ensure_dir(const char *path) {
         perror("mkdir");
         exit(1);
     }
+}
+
+static void ensure_dir_tree(const char *path) {
+    if (!path || !*path) return;
+    char tmp[PATH_MAX];
+    strncpy(tmp, path, sizeof(tmp));
+    tmp[sizeof(tmp) - 1] = '\0';
+    size_t len = strlen(tmp);
+    if (!len) return;
+
+    for (size_t i = 1; i < len; ++i) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            if (*tmp) {
+                ensure_dir(tmp);
+            }
+            tmp[i] = '/';
+        }
+    }
+    ensure_dir(tmp);
 }
 
 static void append_path(char *dest, size_t dest_len, const char *dir, const char *leaf) {
@@ -137,6 +158,37 @@ static char *load_hypr_signature_for_user(const char *user) {
         if (value && *value) return value;
         free(value);
     }
+    return NULL;
+}
+
+static char *auto_detect_hypr_signature(void) {
+    DIR *dir = opendir("/run/user");
+    if (!dir) return NULL;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!entry->d_name[0] || entry->d_name[0] == '.') {
+            continue;
+        }
+        char *end = NULL;
+        errno = 0;
+        unsigned long uid = strtoul(entry->d_name, &end, 10);
+        if (errno != 0 || !end || *end != '\0') {
+            continue;
+        }
+        struct passwd *pw = getpwuid((uid_t)uid);
+        if (!pw || !pw->pw_name) {
+            continue;
+        }
+        char *value = load_hypr_signature_for_user(pw->pw_name);
+        if (value && *value) {
+            closedir(dir);
+            return value;
+        }
+        free(value);
+    }
+
+    closedir(dir);
     return NULL;
 }
 
@@ -856,6 +908,10 @@ static void init_state(struct State *state,
         }
     }
 
+    if (!state->hypr_signature) {
+        state->hypr_signature = auto_detect_hypr_signature();
+    }
+
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
@@ -921,7 +977,7 @@ static void cleanup_state(struct State *state) {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
+            "Usage: %s [--data-dir DIR] [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
             "           [--clipboard auto|off] [--context-refresh SEC] [--context hyprland|none]\n"
             "           [--log-mode events|snapshots|both] [--translate xkb|raw]\n"
             "           [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n"
@@ -930,8 +986,9 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    const char *log_dir = "/realm/data/keylog/logs";
-    const char *snapshot_dir = "/realm/data/keylog/snapshots";
+    const char *data_dir = "/realm/data/keylog";
+    const char *log_dir = NULL;
+    const char *snapshot_dir = NULL;
     const char *hyprctl_cmd = "hyprctl";
     double snapshot_interval = 5.0;
     double context_refresh = 0.4;
@@ -944,11 +1001,16 @@ int main(int argc, char **argv) {
     const char *hypr_signature_path = NULL;
     const char *hypr_user = NULL;
 
+    char log_dir_buf[PATH_MAX] = {0};
+    char snapshot_dir_buf[PATH_MAX] = {0};
+
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
             log_dir = argv[++i];
         } else if (strcmp(argv[i], "--snapshot-dir") == 0 && i + 1 < argc) {
             snapshot_dir = argv[++i];
+        } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
+            data_dir = argv[++i];
         } else if (strcmp(argv[i], "--snapshot-interval") == 0 && i + 1 < argc) {
             snapshot_interval = atof(argv[++i]);
         } else if (strcmp(argv[i], "--context-refresh") == 0 && i + 1 < argc) {
@@ -1014,11 +1076,27 @@ int main(int argc, char **argv) {
         }
     }
 
-    ensure_dir("/realm");
-    ensure_dir("/realm/data");
-    ensure_dir("/realm/data/keylog");
-    ensure_dir(log_dir);
-    ensure_dir(snapshot_dir);
+    if (!log_dir) {
+        int written = snprintf(log_dir_buf, sizeof(log_dir_buf), "%s/logs", data_dir);
+        if (written < 0 || written >= (int)sizeof(log_dir_buf)) {
+            fprintf(stderr, "log dir path too long\n");
+            return 1;
+        }
+        log_dir = log_dir_buf;
+    }
+
+    if (!snapshot_dir) {
+        int written = snprintf(snapshot_dir_buf, sizeof(snapshot_dir_buf), "%s/snapshots", data_dir);
+        if (written < 0 || written >= (int)sizeof(snapshot_dir_buf)) {
+            fprintf(stderr, "snapshot dir path too long\n");
+            return 1;
+        }
+        snapshot_dir = snapshot_dir_buf;
+    }
+
+    ensure_dir_tree(data_dir);
+    ensure_dir_tree(log_dir);
+    ensure_dir_tree(snapshot_dir);
 
     struct State state;
     init_state(&state, log_dir, snapshot_dir, hyprctl_cmd, snapshot_interval, context_refresh,

@@ -9,7 +9,7 @@ SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
 BIN := scribe-tap
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall bench
 
 all: $(BIN)
 
@@ -31,3 +31,6 @@ install: $(BIN)
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+
+bench: $(BIN)
+	python3 tools/bench.py

@@ -14,6 +14,7 @@ contents when a paste shortcut is detected.
 - Appends to daily JSONL logs and maintains one snapshot file per window. Log mode `both` (default) keeps a concise key trail alongside snapshots.
 - Flushes snapshot files after periods of idle typing so that the most recent buffer survives compositor or browser crashes.
 - Detects clipboard pastes (Ctrl+V or Shift+Insert) via `wl-paste` or `xclip`.
+- Learns the Hyprland instance signature automatically when running out of session, so `--hypr-user` is rarely required.
 - Zero external dependencies at runtime beyond the compositor tooling you already have.
 
 ## Building
@@ -28,6 +29,12 @@ Run the basic integration test harness:
 make check
 ```
 
+Run quick throughput benchmarks (writes to a temporary directory):
+
+```sh
+make bench
+```
+
 The `Makefile` honours `CC`, `CFLAGS`, and `prefix`. Install via:
 
 ```sh
@@ -37,7 +44,7 @@ make install prefix=$HOME/.local
 ## Runtime options
 
 ```
-scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
+scribe-tap [--data-dir DIR] [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
            [--clipboard (auto|off)] [--context hyprland|none]
            [--log-mode events|snapshots|both] [--translate xkb|raw]
            [--xkb-layout LAYOUT] [--xkb-variant VARIANT]
@@ -45,8 +52,9 @@ scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
            [--hypr-signature PATH] [--hypr-user USER]
 ```
 
-- `--log-dir` – directory for JSONL log files (`/realm/data/keylog/logs` by default).
-- `--snapshot-dir` – directory for live snapshots (`/realm/data/keylog/snapshots`).
+- `--data-dir` – root directory for artefacts (defaults to `/realm/data/keylog`, creating `logs/` and `snapshots/` automatically).
+- `--log-dir` – directory for JSONL log files (`$data_dir/logs` by default).
+- `--snapshot-dir` – directory for live snapshots (`$data_dir/snapshots`).
 - `--snapshot-interval` – write snapshot at most once per window per interval (seconds).
 - `--clipboard` – control paste capture; `auto` invokes clipboard helpers, `off` disables.
 - `--context` – `hyprland` (default) polls Hyprland for active window; `none` disables polling.

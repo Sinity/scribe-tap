@@ -128,6 +128,58 @@ def main() -> int:
         content = snapshot_files[0].read_text()
         assert content == "ab", f"expected idle flush to persist full buffer, got {content!r}"
 
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--data-dir",
+                str(Path(tmp) / "mirror"),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--context",
+                "none",
+                "--clipboard",
+                "off",
+                "--snapshot-interval",
+                "0",
+                "--log-mode",
+                "both",
+                "--translate",
+                "xkb",
+                "--xkb-layout",
+                "us",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        send_key(proc.stdin, KEY_ENTER, 1)
+        send_key(proc.stdin, KEY_ENTER, 0)
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        files = list(log_dir.glob("*.jsonl"))
+        assert files, "no log files for xkb run"
+        events = [json.loads(line) for line in files[0].read_text().splitlines()]
+        press = [e for e in events if e["event"] == "press"]
+        assert any(e.get("keycode") == "KEY_A" for e in press), "xkb press missing KEY_A"
+        assert any(e.get("keycode") == "KEY_ENTER" for e in press), "xkb press missing KEY_ENTER"
+        snapshots = [e for e in events if e.get("event") == "snapshot"]
+        assert snapshots and snapshots[-1]["buffer"].endswith("\n"), "xkb snapshot should capture newline"
+
     return 0
 
 
