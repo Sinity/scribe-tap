@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <limits.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -408,6 +409,26 @@ static void write_snapshot(struct State *state, struct Buffer *buf, bool force) 
     log_event(state, "snapshot", buf->context, NULL, false, buf->text, NULL);
 }
 
+static void flush_idle_buffers(struct State *state, bool force_all) {
+    if (state->log_mode == LOG_MODE_EVENTS || state->buffers.len == 0) {
+        return;
+    }
+
+    double now = now_seconds();
+    for (size_t i = 0; i < state->buffers.len; ++i) {
+        struct Buffer *buf = &state->buffers.items[i];
+        if (buf->last_update <= buf->last_snapshot) {
+            continue;
+        }
+        if (!force_all) {
+            if (now - buf->last_update < state->snapshot_interval) {
+                continue;
+            }
+        }
+        write_snapshot(state, buf, true);
+    }
+}
+
 static void trim_newline(char *s) {
     if (!s) return;
     size_t len = strlen(s);
@@ -560,8 +581,33 @@ static const char *keycode_name(int code) {
 }
 
 static char lowercase_char_for_key(int code) {
-    if (code >= KEY_A && code <= KEY_Z) return (char)('a' + (code - KEY_A));
     switch (code) {
+        case KEY_A: return 'a';
+        case KEY_B: return 'b';
+        case KEY_C: return 'c';
+        case KEY_D: return 'd';
+        case KEY_E: return 'e';
+        case KEY_F: return 'f';
+        case KEY_G: return 'g';
+        case KEY_H: return 'h';
+        case KEY_I: return 'i';
+        case KEY_J: return 'j';
+        case KEY_K: return 'k';
+        case KEY_L: return 'l';
+        case KEY_M: return 'm';
+        case KEY_N: return 'n';
+        case KEY_O: return 'o';
+        case KEY_P: return 'p';
+        case KEY_Q: return 'q';
+        case KEY_R: return 'r';
+        case KEY_S: return 's';
+        case KEY_T: return 't';
+        case KEY_U: return 'u';
+        case KEY_V: return 'v';
+        case KEY_W: return 'w';
+        case KEY_X: return 'x';
+        case KEY_Y: return 'y';
+        case KEY_Z: return 'z';
         case KEY_1: return '1';
         case KEY_2: return '2';
         case KEY_3: return '3';
@@ -584,6 +630,20 @@ static char lowercase_char_for_key(int code) {
         case KEY_SLASH: return '/';
         case KEY_GRAVE: return '`';
         default: return '\0';
+    }
+}
+
+static bool is_letter_key(int code) {
+    switch (code) {
+        case KEY_A: case KEY_B: case KEY_C: case KEY_D: case KEY_E:
+        case KEY_F: case KEY_G: case KEY_H: case KEY_I: case KEY_J:
+        case KEY_K: case KEY_L: case KEY_M: case KEY_N: case KEY_O:
+        case KEY_P: case KEY_Q: case KEY_R: case KEY_S: case KEY_T:
+        case KEY_U: case KEY_V: case KEY_W: case KEY_X: case KEY_Y:
+        case KEY_Z:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -618,7 +678,7 @@ static char translate_char(struct State *state, int code) {
     char base = lowercase_char_for_key(code);
     if (base) {
         bool shift = state->modifiers[MOD_SHIFT];
-        if (code >= KEY_A && code <= KEY_Z) {
+        if (is_letter_key(code)) {
             if (state->capslock ^ shift) {
                 return (char)(base - 32);
             }
@@ -844,6 +904,7 @@ static void init_state(struct State *state,
 }
 
 static void cleanup_state(struct State *state) {
+    flush_idle_buffers(state, true);
     log_event(state, "stop", NULL, NULL, false, NULL, NULL);
     if (state->log_file) fclose(state->log_file);
     for (size_t i = 0; i < state->buffers.len; ++i) {
@@ -970,45 +1031,88 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    int poll_timeout = -1;
+    if (state.log_mode != LOG_MODE_EVENTS) {
+        double interval_ms = state.snapshot_interval * 1000.0;
+        if (interval_ms < 50.0) {
+            interval_ms = 50.0;
+        } else if (interval_ms > 500.0) {
+            interval_ms = 500.0;
+        }
+        poll_timeout = (int)interval_ms;
+    }
+    struct pollfd pfd = {
+        .fd = STDIN_FILENO,
+        .events = POLLIN,
+    };
+
     while (!g_should_stop) {
-        struct input_event ev;
-        ssize_t n = read(STDIN_FILENO, &ev, sizeof(ev));
-        if (n == 0) {
+        int rc = poll(&pfd, 1, poll_timeout);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll");
             break;
-        } else if (n < 0) {
-            if (errno == EINTR) continue;
-            perror("read");
-            break;
-        } else if (n != sizeof(ev)) {
-            fprintf(stderr, "short read from stdin\n");
+        }
+        if (rc == 0) {
+            flush_idle_buffers(&state, false);
+            continue;
+        }
+
+        bool saw_hup = (pfd.revents & POLLHUP) != 0;
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
             break;
         }
 
-        if (ev.type == EV_KEY) {
-            const char *name = keycode_name(ev.code);
-            if (state.translate_mode == TRANSLATE_XKB && state.xkb_state) {
-                enum xkb_key_direction dir = (ev.value == 0) ? XKB_KEY_UP : XKB_KEY_DOWN;
-                xkb_state_update_key(state.xkb_state, ev.code + 8, dir);
+        if (pfd.revents & POLLIN) {
+            struct input_event ev;
+            ssize_t n = read(STDIN_FILENO, &ev, sizeof(ev));
+            if (n == 0) {
+                break;
+            } else if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("read");
+                break;
+            } else if (n != sizeof(ev)) {
+                fprintf(stderr, "short read from stdin\n");
+                break;
             }
-            if (ev.value == 1 || ev.value == 2) {
-                update_modifiers(&state, ev.code, true);
-                const char *text_ptr = NULL;
-                char utf8_buf[64];
+
+            if (ev.type == EV_KEY) {
+                const char *name = keycode_name(ev.code);
                 if (state.translate_mode == TRANSLATE_XKB && state.xkb_state) {
-                    int len = xkb_state_key_get_utf8(state.xkb_state, ev.code + 8, utf8_buf, sizeof utf8_buf);
-                    if (len > 0) {
-                        utf8_buf[len] = '\0';
-                        text_ptr = utf8_buf;
-                    }
+                    enum xkb_key_direction dir = (ev.value == 0) ? XKB_KEY_UP : XKB_KEY_DOWN;
+                    xkb_state_update_key(state.xkb_state, ev.code + 8, dir);
                 }
-                process_key(&state, ev.code, name, text_ptr);
-            } else if (ev.value == 0) {
-                update_modifiers(&state, ev.code, false);
+                if (ev.value == 1 || ev.value == 2) {
+                    update_modifiers(&state, ev.code, true);
+                    const char *text_ptr = NULL;
+                    char utf8_buf[64];
+                    if (state.translate_mode == TRANSLATE_XKB && state.xkb_state) {
+                        int len = xkb_state_key_get_utf8(state.xkb_state, ev.code + 8, utf8_buf, sizeof utf8_buf);
+                        if (len > 0) {
+                            utf8_buf[len] = '\0';
+                            text_ptr = utf8_buf;
+                        }
+                    }
+                    process_key(&state, ev.code, name, text_ptr);
+                } else if (ev.value == 0) {
+                    update_modifiers(&state, ev.code, false);
+                }
+            }
+
+            if (write(STDOUT_FILENO, &ev, sizeof(ev)) != sizeof(ev)) {
+                perror("write");
+                break;
             }
         }
 
-        if (write(STDOUT_FILENO, &ev, sizeof(ev)) != sizeof(ev)) {
-            perror("write");
+        if (state.log_mode != LOG_MODE_EVENTS) {
+            flush_idle_buffers(&state, false);
+        }
+
+        if (saw_hup && !(pfd.revents & POLLIN)) {
             break;
         }
     }

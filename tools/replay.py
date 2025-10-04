@@ -6,7 +6,7 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
 def load_events(log_path: Path) -> Iterable[dict]:
@@ -37,6 +37,12 @@ def main() -> None:
     parser.add_argument("--mode", choices=["snapshots", "events", "both"], default="snapshots")
     parser.add_argument("--interactive", action="store_true", help="Interactive selection")
     parser.add_argument("--events-tail", type=int, default=20, help="Number of key events to show")
+    parser.add_argument("--session", type=str, help="Filter by session identifier substring")
+    parser.add_argument(
+        "--show-clipboard",
+        action="store_true",
+        help="Print clipboard payloads for matching key events",
+    )
     args = parser.parse_args()
 
     log_path = args.log_dir / f"{args.date}.jsonl"
@@ -62,24 +68,34 @@ def main() -> None:
         slug = "".join(cleaned).strip("_")
         return slug or "window"
 
-    snapshot_events = {}
+    snapshot_events: Dict[str, Tuple[str, str, Optional[str]]] = {}
     for ev in events:
         if ev.get("event") == "snapshot":
             window = ev.get("window") or "unknown"
             slug = slugify(window)
-            snapshot_events[slug] = (window, ev.get("buffer") or "")
+            snapshot_events[slug] = (window, ev.get("buffer") or "", ev.get("session"))
 
-    snapshots: List[Tuple[str, str, Path]] = []
+    def session_matches(value: Optional[str]) -> bool:
+        if not args.session:
+            return True
+        candidate = value or ""
+        return args.session in candidate
+
+    snapshots: List[Tuple[str, str, Path, Optional[str]]] = []
     if args.mode in {"snapshots", "both"}:
         if args.snapshot_dir.exists():
             for path in sorted(args.snapshot_dir.glob("*.txt")):
                 slug = path.stem
-                window, _ = snapshot_events.get(slug, (slug, ""))
+                window, buffer, session = snapshot_events.get(slug, (slug, "", None))
+                if not session_matches(session):
+                    continue
                 content = path.read_text(encoding="utf-8", errors="replace")
-                snapshots.append((window, content, path))
+                snapshots.append((window, content, path, session))
         if not snapshots:
-            for slug, (window, buffer) in snapshot_events.items():
-                snapshots.append((window, buffer, Path()))
+            for slug, (window, buffer, session) in snapshot_events.items():
+                if not session_matches(session):
+                    continue
+                snapshots.append((window, buffer, Path(), session))
 
     def filter_window(name: str) -> bool:
         if not args.window:
@@ -87,16 +103,39 @@ def main() -> None:
         target = args.window.lower()
         return target in (name or "").lower()
 
+    def event_matches(ev: dict) -> bool:
+        return filter_window(ev.get("window") or "") and session_matches(ev.get("session"))
+
+    def format_event(ev: dict) -> str:
+        ts = ev.get("ts") or "--"
+        window = ev.get("window") or "unknown"
+        key = ev.get("keycode") or "(unknown)"
+        marker = "*" if ev.get("changed") else "·"
+        parts = [f"[{ts}] {window}: {marker} {key}"]
+        if args.show_clipboard and ev.get("clipboard"):
+            clip = ev["clipboard"].replace("\n", "\\n")
+            if len(clip) > 80:
+                clip = clip[:77] + "..."
+            parts.append(f"clipboard={clip}")
+        return " ".join(parts)
+
     if args.interactive:
         if args.mode in {"snapshots", "both"} and snapshots:
-            filtered = [(idx + 1, win, buf) for idx, (win, buf, _) in enumerate(snapshots) if filter_window(win)]
+            filtered = [
+                (idx + 1, win, buf, session)
+                for idx, (win, buf, _, session) in enumerate(snapshots)
+                if filter_window(win)
+            ]
             if not filtered:
                 print("No snapshots match the requested criteria.")
             else:
                 print("Snapshots:")
-                for idx, win, buf in filtered:
+                for idx, win, buf, session in filtered:
                     preview = (buf.strip().splitlines() or ["<empty>"])[0]
-                    print(f"  [{idx}] {win}: {preview[:60]}")
+                    if session:
+                        print(f"  [{idx}] {win} (session {session}): {preview[:60]}")
+                    else:
+                        print(f"  [{idx}] {win}: {preview[:60]}")
                 choice = input("Select snapshot (q to quit): ").strip().lower()
                 if choice not in {"q", "quit", "exit", ""}:
                     try:
@@ -104,24 +143,27 @@ def main() -> None:
                     except ValueError:
                         print("Invalid selection")
                         sys.exit(1)
-                    match = next(((win, buf) for i, win, buf in filtered if i == sel), None)
+                    match = next(((win, buf, session) for i, win, buf, session in filtered if i == sel), None)
                     if not match:
                         print("Selection out of range")
                         sys.exit(1)
-                    window, buffer = match
-                    print(f"Window: {window}")
+                    window, buffer, session = match
+                    if session:
+                        print(f"Window: {window} (session {session})")
+                    else:
+                        print(f"Window: {window}")
                     print(buffer.rstrip("\n") or "<empty>")
                     print("---")
                     if args.mode in {"events", "both"}:
                         tail = [
-                            (ev.get("ts"), ev.get("window"), ev.get("keycode"))
+                            ev
                             for ev in events
-                            if ev.get("event") == "press" and filter_window(ev.get("window") or "")
+                            if ev.get("event") == "press" and event_matches(ev)
                         ][-args.events_tail:]
                         if tail:
                             print("Key events (newest last):")
-                            for ts, window_name, key in tail:
-                                print(f"[{ts}] {window_name}: {key}")
+                            for event in tail:
+                                print(format_event(event))
                     sys.exit(0)
                 sys.exit(0)
         else:
@@ -130,11 +172,14 @@ def main() -> None:
 
     if args.mode in {"snapshots", "both"}:
         matched = False
-        for window, buffer, _ in snapshots:
+        for window, buffer, _, session in snapshots:
             if not filter_window(window):
                 continue
             matched = True
-            print(f"Window: {window}")
+            if session:
+                print(f"Window: {window} (session {session})")
+            else:
+                print(f"Window: {window}")
             print(buffer.rstrip("\n") or "<empty>")
             print("---")
         if not matched:
@@ -142,14 +187,14 @@ def main() -> None:
 
     if args.mode in {"events", "both"}:
         trail = [
-            (ev.get("ts"), ev.get("window"), ev.get("keycode"))
+            ev
             for ev in events
-            if ev.get("event") == "press" and filter_window(ev.get("window") or "")
+            if ev.get("event") == "press" and event_matches(ev)
         ][-args.events_tail:]
         if trail:
             print("Key events (newest last):")
-            for ts, window, key in trail:
-                print(f"[{ts}] {window}: {key}")
+            for event in trail:
+                print(format_event(event))
 
 
 if __name__ == "__main__":

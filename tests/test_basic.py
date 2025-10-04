@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 KEY_A = 30
+KEY_B = 48
 KEY_ENTER = 28
 EV_KEY = 0x01
 EV_SYN = 0x00
@@ -82,6 +83,50 @@ def main() -> int:
         content = snapshot_files[0].read_text()
         assert "a" in content
         assert content.endswith("\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--context",
+                "none",
+                "--clipboard",
+                "off",
+                "--snapshot-interval",
+                "10",
+                "--log-mode",
+                "both",
+                "--translate",
+                "raw",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        send_key(proc.stdin, KEY_B, 1)
+        send_key(proc.stdin, KEY_B, 0)
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        snapshot_files = list(snap_dir.glob("*.txt"))
+        assert snapshot_files, "no snapshot files created on idle flush"
+        content = snapshot_files[0].read_text()
+        assert content == "ab", f"expected idle flush to persist full buffer, got {content!r}"
 
     return 0
 

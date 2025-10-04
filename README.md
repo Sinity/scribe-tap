@@ -12,6 +12,7 @@ contents when a paste shortcut is detected.
 - Works inside an existing `udevmon` chain (`intercept | scribe-tap | … | uinput`).
 - Tags each keystroke with the active Hyprland window (title, class, address) and can read the signature from the owning user.
 - Appends to daily JSONL logs and maintains one snapshot file per window. Log mode `both` (default) keeps a concise key trail alongside snapshots.
+- Flushes snapshot files after periods of idle typing so that the most recent buffer survives compositor or browser crashes.
 - Detects clipboard pastes (Ctrl+V or Shift+Insert) via `wl-paste` or `xclip`.
 - Zero external dependencies at runtime beyond the compositor tooling you already have.
 
@@ -60,14 +61,14 @@ scribe-tap [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]
 Snapshots contain the current buffer for their window, making it easy to yank the most
 recent draft if a browser tab eats it. JSON logs hold the full per-key history.
 
-Use the included replay helper to inspect logs (`scribe-tap-replay` when installed via Nix). It can list snapshots, tail events, or run interactively:
+Use the included replay helper to inspect logs (`scribe-tap-replay` when installed via Nix). It can list snapshots, tail events, or run interactively. Filter output by window or session id and optionally surface clipboard payloads:
 
 ```sh
 # latest snapshots and tail events
-python3 tools/replay.py --log-dir /realm/data/keylog/logs --snapshot-dir /realm/data/keylog/snapshots --mode both --window messenger --events-tail 10
+python3 tools/replay.py --log-dir /realm/data/keylog/logs --snapshot-dir /realm/data/keylog/snapshots --mode both --window messenger --events-tail 10 --show-clipboard
 
 # interactive picker
-python3 tools/replay.py --snapshot-dir /realm/data/keylog/snapshots --interactive
+python3 tools/replay.py --snapshot-dir /realm/data/keylog/snapshots --interactive --session 20251003T001711
 ```
 
 ## License
