@@ -17,10 +17,10 @@ check: $(BIN)
 	python3 tests/test_basic.py
 
 $(BIN): $(OBJ)
-	$(CC) $(CFLAGS) $(PKG_LIBS) -o $@ $^
+	$(CC) $(CFLAGS) -pthread -o $@ $^ $(PKG_LIBS)
 
 src/%.o: src/%.c
-	$(CC) $(CFLAGS) $(PKG_CFLAGS) -Isrc -Iinclude -c -o $@ $<
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -pthread -Isrc -Iinclude -c -o $@ $<
 
 clean:
 	rm -f $(OBJ) $(BIN)
