@@ -9,6 +9,55 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
+def _sanitize_slug_base(text: str) -> str:
+    chars: List[str] = []
+    prev_underscore = False
+    for ch in text:
+        if "a" <= ch <= "z" or "0" <= ch <= "9":
+            chars.append(ch)
+            prev_underscore = False
+        elif "A" <= ch <= "Z":
+            chars.append(ch.lower())
+            prev_underscore = False
+        else:
+            if not prev_underscore:
+                chars.append("_")
+                prev_underscore = True
+        if len(chars) >= 80:
+            break
+    if not chars:
+        return "window"
+    return "".join(chars)
+
+
+def _fnv1a32(text: str) -> int:
+    hash_val = 0x811C9DC5
+    for ch in text:
+        hash_val ^= ord(ch) & 0xFF
+        hash_val = (hash_val * 0x01000193) & 0xFFFFFFFF
+    return hash_val
+
+
+def make_slug(text: str) -> Tuple[str, str]:
+    base = _sanitize_slug_base(text)
+    legacy = base
+
+    hash_val = _fnv1a32(text)
+    suffix = f"-{hash_val & 0xFFFFFF:06x}"
+    max_total = 80
+
+    if len(base) + len(suffix) > max_total:
+        if max_total > len(suffix):
+            hashed_base = base[: max_total - len(suffix)]
+        else:
+            hashed_base = ""
+    else:
+        hashed_base = base
+
+    hashed = f"{hashed_base}{suffix}" if hashed_base else suffix
+    return hashed, legacy
+
+
 def load_events(log_path: Path) -> Iterable[dict]:
     if not log_path.exists():
         raise SystemExit(f"Log file not found: {log_path}")
@@ -54,26 +103,14 @@ def main() -> None:
         else:
             raise
 
-    def slugify(text: str) -> str:
-        cleaned: List[str] = []
-        prev_underscore = False
-        for ch in text:
-            if ch.isalnum():
-                cleaned.append(ch.lower())
-                prev_underscore = False
-            else:
-                if not prev_underscore:
-                    cleaned.append("_")
-                    prev_underscore = True
-        slug = "".join(cleaned).strip("_")
-        return slug or "window"
-
     snapshot_events: Dict[str, Tuple[str, str, Optional[str]]] = {}
     for ev in events:
         if ev.get("event") == "snapshot":
             window = ev.get("window") or "unknown"
-            slug = slugify(window)
+            slug, legacy_slug = make_slug(window)
             snapshot_events[slug] = (window, ev.get("buffer") or "", ev.get("session"))
+            if legacy_slug not in snapshot_events:
+                snapshot_events[legacy_slug] = (window, ev.get("buffer") or "", ev.get("session"))
 
     def session_matches(value: Optional[str]) -> bool:
         if not args.session:
