@@ -45,5 +45,10 @@
         ];
       };
     });
+
+    nixosModules = {
+      default = import ./nix/modules/scribe-tap.nix { inherit self; };
+      scribe-tap = import ./nix/modules/scribe-tap.nix { inherit self; };
+    };
   };
 }

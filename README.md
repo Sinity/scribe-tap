@@ -17,6 +17,29 @@ contents when a paste shortcut is detected.
 - Learns the Hyprland instance signature automatically when running out of session, so `--hypr-user` is rarely required.
 - Zero external dependencies at runtime beyond the compositor tooling you already have.
 
+### NixOS module
+
+The flake exports `nixosModules.default`, a high-level module that creates state directories, wires up command-line flags, and exposes the fully rendered invocation for downstream pipeline modules. After adding the flake as an input:
+
+```nix
+{
+  imports = [ inputs.scribe-tap.nixosModules.default ];
+
+  services.scribeTap = {
+    enable = true;
+    dataDir = "/var/lib/scribe-tap";
+    logMode = "both";
+    translateMode = "xkb";
+    hyprUser = "sinity";
+    xkbLayout = "pl";
+    directoryUser = "sinity";
+    directoryGroup = "users";
+  };
+}
+```
+
+The module publishes `services.scribeTap.command` (list form), `commandString` (shell form), and the resolved directories in `services.scribeTap.resolvedPaths`, keeping pipeline configuration declarative.
+
 ## Building
 
 ```sh
