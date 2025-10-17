@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 static void ensure_dir(const char *path) {
     struct stat st;
@@ -30,15 +31,66 @@ static void ensure_dir(const char *path) {
     }
 }
 
+static bool read_test_time_override(clockid_t clock_id, struct timespec *ts) {
+    const char *path = getenv("SCRIBE_TAP_TEST_TIME_FILE");
+    if (!path || !*path || !ts) {
+        return false;
+    }
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+
+    bool ok = false;
+    char *line = NULL;
+    size_t cap = 0;
+    long long sec = 0;
+    long long nsec = 0;
+
+    ssize_t len = getline(&line, &cap, f);
+    if (len >= 0) {
+        if (sscanf(line, "%lld %lld", &sec, &nsec) == 2) {
+            if (clock_id == CLOCK_REALTIME) {
+                ts->tv_sec = (time_t)sec;
+                ts->tv_nsec = (long)nsec;
+                ok = true;
+                goto out;
+            }
+        }
+    }
+
+    if (clock_id == CLOCK_MONOTONIC) {
+        long long msec = sec;
+        long long mnsec = nsec;
+        ssize_t len2 = getline(&line, &cap, f);
+        if (len2 >= 0) {
+            long long tmp_sec = 0;
+            long long tmp_nsec = 0;
+            if (sscanf(line, "%lld %lld", &tmp_sec, &tmp_nsec) == 2) {
+                msec = tmp_sec;
+                mnsec = tmp_nsec;
+            }
+        }
+        ts->tv_sec = (time_t)msec;
+        ts->tv_nsec = (long)mnsec;
+        ok = true;
+    }
+
+out:
+    free(line);
+    fclose(f);
+    return ok;
+}
+
 double util_now_seconds(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    util_get_monotonic(&ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 void util_iso8601(char *buf, size_t len) {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    util_get_realtime(&ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
     int millis = (int)(ts.tv_nsec / 1000000);
@@ -50,6 +102,22 @@ void util_iso8601(char *buf, size_t len) {
              tm.tm_min,
              tm.tm_sec,
              millis);
+}
+
+void util_get_realtime(struct timespec *ts) {
+    if (!ts) return;
+    if (read_test_time_override(CLOCK_REALTIME, ts)) {
+        return;
+    }
+    clock_gettime(CLOCK_REALTIME, ts);
+}
+
+void util_get_monotonic(struct timespec *ts) {
+    if (!ts) return;
+    if (read_test_time_override(CLOCK_MONOTONIC, ts)) {
+        return;
+    }
+    clock_gettime(CLOCK_MONOTONIC, ts);
 }
 
 void util_ensure_dir_tree(const char *path) {

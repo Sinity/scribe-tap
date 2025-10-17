@@ -58,6 +58,19 @@ Run quick throughput benchmarks (writes to a temporary directory):
 make bench
 ```
 
+### Test Harness Helpers
+
+The integration tests spoof wall-clock time and Hyprland tooling via dedicated
+environment hooks:
+
+- `SCRIBE_TAP_TEST_TIME_FILE` – path to a file containing two lines, the first
+  with `<real_sec> <real_nsec>` and the optional second with
+  `<monotonic_sec> <monotonic_nsec>`. When set, the binary uses those values for
+  `CLOCK_REALTIME`/`CLOCK_MONOTONIC`, enabling deterministic day transitions in
+  `tests/test_basic.py`.
+- `SCRIBE_TAP_TEST_HYPRCTL` – absolute path to a stub `hyprctl` binary used when
+  resolving the compositor context during tests.
+
 The `Makefile` honours `CC`, `CFLAGS`, and `prefix`. Install via:
 
 ```sh

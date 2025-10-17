@@ -112,6 +112,14 @@ static bool resolve_command_in_path(const char *name, char *out, size_t out_len)
 static void maybe_resolve_hyprctl(State *state, const StateConfig *config) {
     if (!state) return;
 
+    const char *test_override = getenv("SCRIBE_TAP_TEST_HYPRCTL");
+    if (test_override && *test_override) {
+        if (access(test_override, X_OK) == 0) {
+            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), test_override, "hyprctl command");
+            return;
+        }
+    }
+
     char resolved[PATH_MAX];
     if (resolve_command_in_path(state->hyprctl_cmd, resolved, sizeof(resolved))) {
         copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), resolved, "hyprctl command");
@@ -300,7 +308,7 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
     }
 
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    util_get_realtime(&ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
     snprintf(state->session_id, sizeof(state->session_id),
@@ -686,7 +694,7 @@ static void rotate_log_if_needed(State *state) {
     if (!state) return;
 
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    util_get_realtime(&ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
 

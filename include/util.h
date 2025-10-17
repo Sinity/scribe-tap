@@ -2,10 +2,13 @@
 #define UTIL_H
 
 #include <stddef.h>
+#include <time.h>
 
 /* time helpers */
 double util_now_seconds(void);
 void util_iso8601(char *buf, size_t len);
+void util_get_realtime(struct timespec *ts);
+void util_get_monotonic(struct timespec *ts);
 
 /* filesystem helpers */
 void util_ensure_dir_tree(const char *path);

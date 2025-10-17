@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+import datetime
 import json
 import os
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 KEY_A = 30
@@ -26,6 +28,37 @@ def pack_event(sec: int, usec: int, ev_type: int, code: int, value: int) -> byte
 def send_key(stream, code: int, value: int) -> None:
     stream.write(pack_event(0, 0, EV_KEY, code, value))
     stream.write(pack_event(0, 0, EV_SYN, 0, 0))
+
+
+def write_fake_time(path: Path, dt: datetime.datetime, monotonic: float = None) -> None:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    dt = dt.astimezone(datetime.timezone.utc)
+    real_sec = int(dt.timestamp())
+    real_nsec = int(round((dt.timestamp() - real_sec) * 1_000_000_000))
+    if real_nsec >= 1_000_000_000:
+        real_sec += 1
+        real_nsec -= 1_000_000_000
+    if monotonic is None:
+        mono_sec = real_sec
+        mono_nsec = real_nsec
+    else:
+        mono_sec = int(monotonic)
+        mono_nsec = int(round((monotonic - mono_sec) * 1_000_000_000))
+        if mono_nsec >= 1_000_000_000:
+            mono_sec += 1
+            mono_nsec -= 1_000_000_000
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(f"{real_sec} {real_nsec}\n{mono_sec} {mono_nsec}\n")
+
+
+def wait_for(predicate, timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("timed out waiting for condition")
 
 
 def main() -> int:
@@ -346,6 +379,213 @@ exit 1
         focus_events = [e for e in events if e.get("event") == "focus"]
         assert focus_events, "missing focus event for custom hyprctl"
         assert "Doc" in focus_events[-1].get("window", "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        time_file = Path(tmp) / "time.txt"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+
+        day_one = datetime.datetime(2021, 1, 1, 23, 59, 50, tzinfo=datetime.timezone.utc)
+        day_two = day_one + datetime.timedelta(minutes=2)
+        write_fake_time(time_file, day_one, monotonic=1000.0)
+
+        env = os.environ.copy()
+        env["SCRIBE_TAP_TEST_TIME_FILE"] = str(time_file)
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--context",
+                "none",
+                "--clipboard",
+                "off",
+                "--snapshot-interval",
+                "0",
+                "--log-mode",
+                "both",
+                "--translate",
+                "raw",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+
+        wait_for(lambda: (log_dir / "2021-01-01.jsonl").exists())
+
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        proc.stdin.flush()
+
+        write_fake_time(time_file, day_two, monotonic=2000.0)
+
+        send_key(proc.stdin, KEY_B, 1)
+        send_key(proc.stdin, KEY_B, 0)
+        proc.stdin.flush()
+
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        wait_for(lambda: (log_dir / "2021-01-02.jsonl").exists())
+        files = sorted(f.name for f in log_dir.glob("*.jsonl"))
+        assert "2021-01-02.jsonl" in files, files
+
+        day_one_events = [
+            json.loads(line)
+            for line in (log_dir / "2021-01-01.jsonl").read_text().splitlines()
+        ]
+        day_two_events = [
+            json.loads(line)
+            for line in (log_dir / "2021-01-02.jsonl").read_text().splitlines()
+        ]
+        assert any(e.get("event") == "start" for e in day_one_events), day_one_events
+        assert any(e.get("event") == "stop" for e in day_two_events), day_two_events
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        sig_file = Path(tmp) / "sig"
+        time_file = Path(tmp) / "time.txt"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+        sig_file.write_text("signature", encoding="utf-8")
+
+        base_dt = datetime.datetime(2021, 1, 3, 12, 0, tzinfo=datetime.timezone.utc)
+        write_fake_time(time_file, base_dt, monotonic=3000.0)
+
+        hyprctl_path = Path(tmp) / "hyprctl"
+        hyprctl_path.write_text(
+            """#!/bin/sh
+if [ "$1" = "--instance" ]; then
+  shift 2
+fi
+if [ "$1" = "activewindow" ] && [ "$2" = "-j" ]; then
+  printf '{"title":"Stub","class":"Editor","address":"0xbeef"}'
+  exit 0
+fi
+exit 1
+""",
+            encoding="utf-8",
+        )
+        hyprctl_path.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = ""
+        env["SCRIBE_TAP_TEST_HYPRCTL"] = str(hyprctl_path)
+        env["SCRIBE_TAP_TEST_TIME_FILE"] = str(time_file)
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--hypr-signature",
+                str(sig_file),
+                "--snapshot-interval",
+                "0",
+                "--context-refresh",
+                "0",
+                "--translate",
+                "raw",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        proc.stdin.flush()
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        wait_for(lambda: (log_dir / "2021-01-03.jsonl").exists())
+        focus_lines = (log_dir / "2021-01-03.jsonl").read_text().splitlines()
+        focus_records = [json.loads(line) for line in focus_lines]
+        focus_events = [rec for rec in focus_records if rec.get("event") == "focus"]
+        assert focus_events, "expected focus event with fallback hyprctl"
+        assert focus_events[-1].get("window") == "Stub (Editor) [0xbeef]"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        time_file = Path(tmp) / "time.txt"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+
+        base_dt = datetime.datetime(2021, 1, 4, 9, 0, tzinfo=datetime.timezone.utc)
+        write_fake_time(time_file, base_dt, monotonic=4000.0)
+
+        env = os.environ.copy()
+        env["SCRIBE_TAP_TEST_TIME_FILE"] = str(time_file)
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--context",
+                "none",
+                "--clipboard",
+                "off",
+                "--snapshot-interval",
+                "0",
+                "--log-mode",
+                "both",
+                "--translate",
+                "xkb",
+                "--xkb-layout",
+                "us",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+
+        send_key(proc.stdin, KEY_LEFTSHIFT, 1)
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        send_key(proc.stdin, KEY_LEFTSHIFT, 0)
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        proc.stdin.flush()
+
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        snapshot_files = list(snap_dir.glob("*.txt"))
+        assert snapshot_files, "missing snapshots in modifier regression test"
+        content = snapshot_files[0].read_text(encoding="utf-8")
+        assert content == "Aa", f"unexpected snapshot content: {content!r}"
+        assert all(ord(ch) < 128 for ch in content), content
+
+        wait_for(lambda: (log_dir / "2021-01-04.jsonl").exists())
+        events = [json.loads(line) for line in (log_dir / "2021-01-04.jsonl").read_text().splitlines()]
+        snapshots = [e for e in events if e.get("event") == "snapshot"]
+        assert snapshots, "expected snapshot events"
+        assert snapshots[-1]["buffer"] == "Aa", snapshots[-1]
 
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
