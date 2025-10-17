@@ -72,6 +72,9 @@ typedef struct State {
     const char *xkb_variant;
 
     FILE *log_file;
+    int log_year;
+    int log_month;
+    int log_day;
     BufferList buffers;
     char current_context[512];
     double last_context_poll;

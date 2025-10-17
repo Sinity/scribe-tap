@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #if STATE_HAVE_XKBCOMMON
 #include <xkbcommon/xkbcommon.h>
@@ -32,6 +33,8 @@ static void log_event(State *state, const char *event, const char *window,
 static void write_snapshot(State *state, Buffer *buf, bool force);
 static void update_context(State *state);
 static void update_modifiers(State *state, int code, int value);
+static bool open_log_file_for_tm(State *state, const struct tm *tm);
+static void rotate_log_if_needed(State *state);
 
 static void copy_path_checked(char *dest, size_t dest_len, const char *src, const char *label) {
     if (!dest || dest_len == 0) {
@@ -45,6 +48,120 @@ static void copy_path_checked(char *dest, size_t dest_len, const char *src, cons
     if (written < 0 || (size_t)written >= dest_len) {
         fprintf(stderr, "%s path too long\n", label);
         exit(1);
+    }
+}
+
+static bool resolve_command_in_path(const char *name, char *out, size_t out_len) {
+    if (!name || !*name) {
+        return false;
+    }
+    if (strchr(name, '/')) {
+        if (access(name, X_OK) == 0) {
+            if (out && out_len) {
+                int written = snprintf(out, out_len, "%s", name);
+                if (written < 0 || (size_t)written >= out_len) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    const char *path_env = getenv("PATH");
+    if (!path_env || !*path_env) {
+        return false;
+    }
+
+    const char *cursor = path_env;
+    while (*cursor) {
+        const char *sep = strchr(cursor, ':');
+        size_t segment_len = sep ? (size_t)(sep - cursor) : strlen(cursor);
+        char dir[PATH_MAX];
+        if (segment_len >= sizeof(dir)) {
+            /* skip unreasonable PATH entries */
+        } else {
+            if (segment_len == 0) {
+                dir[0] = '.';
+                dir[1] = '\0';
+            } else {
+                memcpy(dir, cursor, segment_len);
+                dir[segment_len] = '\0';
+            }
+            char candidate[PATH_MAX];
+            int written = snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
+            if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
+                if (out && out_len) {
+                    int copy_written = snprintf(out, out_len, "%s", candidate);
+                    if (copy_written < 0 || (size_t)copy_written >= out_len) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        if (!sep) {
+            break;
+        }
+        cursor = sep + 1;
+    }
+
+    return false;
+}
+
+static void maybe_resolve_hyprctl(State *state, const StateConfig *config) {
+    if (!state) return;
+
+    char resolved[PATH_MAX];
+    if (resolve_command_in_path(state->hyprctl_cmd, resolved, sizeof(resolved))) {
+        copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), resolved, "hyprctl command");
+        return;
+    }
+
+    if (!config || !config->hypr_user) {
+        return;
+    }
+
+    struct passwd *pw = getpwnam(config->hypr_user);
+    if (!pw) {
+        return;
+    }
+
+    const char *user = (pw->pw_name && pw->pw_name[0]) ? pw->pw_name : config->hypr_user;
+    const char *home = pw->pw_dir;
+    char candidate[PATH_MAX];
+
+    if (user) {
+        int written = snprintf(candidate, sizeof(candidate), "/etc/profiles/per-user/%s/bin/hyprctl", user);
+        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
+            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
+            return;
+        }
+    }
+
+    if (home && *home) {
+        int written = snprintf(candidate, sizeof(candidate), "%s/.nix-profile/bin/hyprctl", home);
+        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
+            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
+            return;
+        }
+        written = snprintf(candidate, sizeof(candidate), "%s/.local/bin/hyprctl", home);
+        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
+            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
+            return;
+        }
+    }
+
+    const char *system_candidates[] = {
+        "/run/current-system/sw/bin/hyprctl",
+        "/usr/bin/hyprctl",
+        "/usr/local/bin/hyprctl",
+    };
+    for (size_t i = 0; i < sizeof(system_candidates) / sizeof(system_candidates[0]); ++i) {
+        if (access(system_candidates[i], X_OK) == 0) {
+            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), system_candidates[i], "hyprctl command");
+            return;
+        }
     }
 }
 
@@ -156,6 +273,7 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
     copy_path_checked(state->log_dir, sizeof(state->log_dir), config->log_dir, "log directory");
     copy_path_checked(state->snapshot_dir, sizeof(state->snapshot_dir), config->snapshot_dir, "snapshot directory");
     copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), config->hyprctl_cmd, "hyprctl command");
+    maybe_resolve_hyprctl(state, config);
     state->snapshot_interval = config->snapshot_interval;
     state->context_refresh = config->context_refresh;
     state->clipboard_mode = config->clipboard_mode;
@@ -195,16 +313,7 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
              tm.tm_sec,
              ts.tv_nsec / 1000);
 
-    char log_name[64];
-    snprintf(log_name, sizeof(log_name), "%04d-%02d-%02d.jsonl",
-             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
-
-    char log_path[PATH_MAX];
-    util_append_path(log_path, sizeof(log_path), state->log_dir, log_name);
-
-    state->log_file = fopen(log_path, "a");
-    if (!state->log_file) {
-        perror("fopen log");
+    if (!open_log_file_for_tm(state, &tm)) {
         exit(1);
     }
 
@@ -542,9 +651,65 @@ static void update_context(State *state) {
     free(json);
 }
 
+static bool open_log_file_for_tm(State *state, const struct tm *tm) {
+    if (!state || !tm) return false;
+
+    char log_name[64];
+    int name_written = snprintf(log_name, sizeof(log_name), "%04d-%02d-%02d.jsonl",
+                                tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+    if (name_written < 0 || (size_t)name_written >= sizeof(log_name)) {
+        fprintf(stderr, "log filename too long\n");
+        return false;
+    }
+
+    char log_path[PATH_MAX];
+    util_append_path(log_path, sizeof(log_path), state->log_dir, log_name);
+
+    FILE *file = fopen(log_path, "a");
+    if (!file) {
+        perror("fopen log");
+        return false;
+    }
+
+    if (state->log_file) {
+        fflush(state->log_file);
+        fclose(state->log_file);
+    }
+    state->log_file = file;
+    state->log_year = tm->tm_year + 1900;
+    state->log_month = tm->tm_mon + 1;
+    state->log_day = tm->tm_mday;
+    return true;
+}
+
+static void rotate_log_if_needed(State *state) {
+    if (!state) return;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+
+    int year = tm.tm_year + 1900;
+    int month = tm.tm_mon + 1;
+    int day = tm.tm_mday;
+
+    if (state->log_file &&
+        state->log_year == year &&
+        state->log_month == month &&
+        state->log_day == day) {
+        return;
+    }
+
+    if (!open_log_file_for_tm(state, &tm)) {
+        /* Leave the previous file in place so we continue logging somewhere. */
+    }
+}
+
 static void log_event(State *state, const char *event, const char *window,
                       const char *keycode, bool changed, const char *buffer_text,
                       const char *clipboard_text) {
+    rotate_log_if_needed(state);
     if (!state->log_file) return;
     bool is_press = (event && strcmp(event, "press") == 0);
     bool is_snapshot = (event && strcmp(event, "snapshot") == 0);
@@ -731,6 +896,13 @@ void state_process_input(State *state, const struct input_event *event) {
     }
 
     const char *name = keycode_name(event->code);
+
+    if (event->value == 1 || event->value == 2) {
+        update_modifiers(state, event->code, event->value);
+    } else if (event->value == 0) {
+        update_modifiers(state, event->code, 0);
+    }
+
 #if STATE_HAVE_XKBCOMMON
     if (state->translate_mode == TRANSLATE_XKB && state->xkb_state) {
         enum xkb_key_direction dir = (event->value == 0) ? XKB_KEY_UP : XKB_KEY_DOWN;
@@ -739,14 +911,13 @@ void state_process_input(State *state, const struct input_event *event) {
 #endif
 
     if (event->value == 1 || event->value == 2) {
-        update_modifiers(state, event->code, event->value);
 #if STATE_HAVE_XKBCOMMON
         char static_buf[64];
 #endif
         char *dynamic_buf = NULL;
         const char *text_ptr = NULL;
 #if STATE_HAVE_XKBCOMMON
-        if (state->translate_mode == TRANSLATE_XKB) {
+        if (state->translate_mode == TRANSLATE_XKB && state->xkb_state) {
             int needed = xkb_state_key_get_utf8(state->xkb_state, event->code + 8, NULL, 0);
             if (needed > 0) {
                 if ((size_t)needed < sizeof(static_buf)) {
@@ -777,7 +948,5 @@ void state_process_input(State *state, const struct input_event *event) {
 #endif
         process_key(state, event->code, name, text_ptr, dynamic_buf);
         free(dynamic_buf);
-    } else if (event->value == 0) {
-        update_modifiers(state, event->code, 0);
     }
 }
