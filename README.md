@@ -88,7 +88,7 @@ scribe-tap [--data-dir DIR] [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-int
            [--hypr-signature PATH] [--hypr-user USER]
 ```
 
-- `--data-dir` – root directory for artefacts (defaults to `/realm/data/keylog`, creating `logs/` and `snapshots/` automatically).
+- `--data-dir` – root directory for artefacts (defaults to `/realm/data/captures/keylog`, creating `logs/` and `snapshots/` automatically).
 - `--log-dir` – directory for JSONL log files (`$data_dir/logs` by default).
 - `--snapshot-dir` – directory for live snapshots (`$data_dir/snapshots`).
 - `--snapshot-interval` – write snapshot at most once per window per interval (seconds).
@@ -109,10 +109,10 @@ Use the included replay helper to inspect logs (`scribe-tap-replay` when install
 
 ```sh
 # latest snapshots and tail events
-python3 tools/replay.py --log-dir /realm/data/keylog/logs --snapshot-dir /realm/data/keylog/snapshots --mode both --window messenger --events-tail 10 --show-clipboard
+python3 tools/replay.py --log-dir /realm/data/captures/keylog/logs --snapshot-dir /realm/data/captures/keylog/snapshots --mode both --window messenger --events-tail 10 --show-clipboard
 
 # interactive picker
-python3 tools/replay.py --snapshot-dir /realm/data/keylog/snapshots --interactive --session 20251003T001711
+python3 tools/replay.py --snapshot-dir /realm/data/captures/keylog/snapshots --interactive --session 20251003T001711
 ```
 
 ## License

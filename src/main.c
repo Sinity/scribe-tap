@@ -248,7 +248,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    const char *data_dir = "/realm/data/keylog";
+    const char *data_dir = "/realm/data/captures/keylog";
     const char *log_dir = NULL;
     const char *snapshot_dir = NULL;
     const char *hyprctl_cmd = "hyprctl";

@@ -74,8 +74,8 @@ def load_events(log_path: Path) -> Iterable[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--log-dir", type=Path, default=Path("/realm/data/keylog/logs"))
-    parser.add_argument("--snapshot-dir", type=Path, default=Path("/realm/data/keylog/snapshots"))
+    parser.add_argument("--log-dir", type=Path, default=Path("/realm/data/captures/keylog/logs"))
+    parser.add_argument("--snapshot-dir", type=Path, default=Path("/realm/data/captures/keylog/snapshots"))
     parser.add_argument(
         "--date",
         type=str,
