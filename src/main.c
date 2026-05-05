@@ -248,9 +248,12 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    const char *data_dir = "/realm/data/keylog";
+    const char *data_dir = "/realm/data/captures/keylog";
     const char *log_dir = NULL;
     const char *snapshot_dir = NULL;
+    bool data_dir_explicit = false;
+    bool log_dir_explicit = false;
+    bool snapshot_dir_explicit = false;
     const char *hyprctl_cmd = "hyprctl";
     double snapshot_interval = 5.0;
     double context_refresh = 0.4;
@@ -269,10 +272,13 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
             log_dir = argv[++i];
+            log_dir_explicit = true;
         } else if (strcmp(argv[i], "--snapshot-dir") == 0 && i + 1 < argc) {
             snapshot_dir = argv[++i];
+            snapshot_dir_explicit = true;
         } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
             data_dir = argv[++i];
+            data_dir_explicit = true;
         } else if (strcmp(argv[i], "--snapshot-interval") == 0 && i + 1 < argc) {
             snapshot_interval = atof(argv[++i]);
         } else if (strcmp(argv[i], "--context-refresh") == 0 && i + 1 < argc) {
@@ -356,7 +362,9 @@ int main(int argc, char **argv) {
         snapshot_dir = snapshot_dir_buf;
     }
 
-    util_ensure_dir_tree(data_dir);
+    if (data_dir_explicit || !log_dir_explicit || !snapshot_dir_explicit) {
+        util_ensure_dir_tree(data_dir);
+    }
     util_ensure_dir_tree(log_dir);
     util_ensure_dir_tree(snapshot_dir);
 

@@ -358,6 +358,8 @@ int state_poll_timeout_ms(const State *state) {
     return (int)interval_ms;
 }
 
+static char lowercase_char_for_key(int code);  /* forward decl for keycode_name */
+
 static const char *keycode_name(int code) {
     static char buf[32];
     switch (code) {
@@ -371,9 +373,15 @@ static const char *keycode_name(int code) {
         default:
             break;
     }
-    if (code >= KEY_A && code <= KEY_Z) {
-        snprintf(buf, sizeof(buf), "KEY_%c", 'A' + (code - KEY_A));
-        return buf;
+    /* Use lowercase_char_for_key() to get the correct letter — evdev keycodes
+       are NOT contiguous A-Z (they follow keyboard rows: Q=16..P=25, A=30..L=38, Z=44..M=50).
+       The old code assumed contiguous codes and mislabeled most letters. */
+    {
+        char letter = lowercase_char_for_key(code);
+        if (letter >= 'a' && letter <= 'z') {
+            snprintf(buf, sizeof(buf), "KEY_%c", letter - 32);  /* uppercase */
+            return buf;
+        }
     }
     if (code >= KEY_0 && code <= KEY_9) {
         snprintf(buf, sizeof(buf), "KEY_%c", '0' + (code - KEY_0));
@@ -865,6 +873,11 @@ static void process_key(State *state, int code, const char *key_name, const char
                     buffer_append(buf, clipboard, strlen(clipboard));
                     changed = true;
                 }
+            } else if (state->modifiers[MOD_CTRL] || state->modifiers[MOD_ALT]) {
+                /* Skip buffer append when Ctrl or Alt is held — xkbcommon returns
+                   control codes (0x01-0x1f) that corrupt the buffer. The press event
+                   still logs the keycode for reconstruction from raw events. */
+                break;
             } else {
                 if (utf8_text && *utf8_text) {
                     buffer_append(buf, utf8_text, strlen(utf8_text));

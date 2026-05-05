@@ -6,3 +6,7 @@ scribe-tap
 *.gcno
 *.gcov
 .DS_Store
+
+AGENTS.override.md
+
+AGENTS.md
