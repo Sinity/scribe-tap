@@ -35,9 +35,7 @@ let
       [ "--log-dir" resolvedLogDir ]
       [ "--snapshot-dir" resolvedSnapshotDir ]
       [ "--snapshot-interval" (floatToString cfg.snapshotInterval) ]
-      [ "--context-refresh" (floatToString cfg.contextRefresh) ]
       [ "--clipboard" cfg.clipboardMode ]
-      [ "--context" cfg.contextMode ]
       [ "--log-mode" cfg.logMode ]
       [ "--translate" cfg.translateMode ]
       (optionals (cfg.xkbLayout != null) [
@@ -47,18 +45,6 @@ let
       (optionals (cfg.xkbVariant != null) [
         "--xkb-variant"
         cfg.xkbVariant
-      ])
-      (optionals (cfg.hyprSignaturePath != null) [
-        "--hypr-signature"
-        cfg.hyprSignaturePath
-      ])
-      (optionals (cfg.hyprUser != null) [
-        "--hypr-user"
-        cfg.hyprUser
-      ])
-      (optionals (cfg.hyprctlCommand != null) [
-        "--hyprctl"
-        cfg.hyprctlCommand
       ])
       cfg.extraArgs
     ];
@@ -111,22 +97,10 @@ in
       description = "Interval (seconds) between log snapshots.";
     };
 
-    contextRefresh = mkOption {
-      type = types.number;
-      default = 0.4;
-      description = "Polling interval (seconds) for context refresh.";
-    };
-
     clipboardMode = mkOption {
       type = types.enum [ "auto" "off" ];
       default = "auto";
       description = "Clipboard handling mode passed to --clipboard.";
-    };
-
-    contextMode = mkOption {
-      type = types.enum [ "hyprland" "none" ];
-      default = "hyprland";
-      description = "Context provider passed to --context.";
     };
 
     logMode = mkOption {
@@ -151,24 +125,6 @@ in
       type = types.nullOr types.str;
       default = null;
       description = "Keyboard layout variant forwarded via --xkb-variant.";
-    };
-
-    hyprctlCommand = mkOption {
-      type = types.str;
-      default = "hyprctl";
-      description = "Command used for Hyprland inspection (--hyprctl).";
-    };
-
-    hyprSignaturePath = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      description = "Signature file path passed via --hypr-signature when provided.";
-    };
-
-    hyprUser = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      description = "Hyprland user supplied via --hypr-user.";
     };
 
     extraArgs = mkOption {
