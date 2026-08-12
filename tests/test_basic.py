@@ -18,7 +18,12 @@ KEY_LEFTSHIFT = 42
 KEY_INSERT = 110
 KEY_CAPSLOCK = 58
 EV_KEY = 0x01
+EV_REL = 0x02
 EV_SYN = 0x00
+BTN_LEFT = 0x110
+REL_X = 0x00
+REL_Y = 0x01
+REL_WHEEL = 0x08
 
 
 def pack_event(sec: int, usec: int, ev_type: int, code: int, value: int) -> bytes:
@@ -81,8 +86,6 @@ def main() -> int:
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -136,8 +139,6 @@ def main() -> int:
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -182,8 +183,6 @@ def main() -> int:
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -259,8 +258,6 @@ fi
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "auto",
                 "--snapshot-interval",
@@ -323,66 +320,6 @@ fi
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         snap_dir = Path(tmp) / "snapshots"
-        sig_file = Path(tmp) / "sig"
-        stub_dir = Path(tmp) / "very" / "long" / "nested" / "path"
-        stub_dir.mkdir(parents=True)
-        log_dir.mkdir()
-        snap_dir.mkdir()
-        sig_file.write_text("signature", encoding="utf-8")
-
-        script_path = stub_dir / ("hyprctl_" + "x" * 80)
-        script_path.write_text(
-            """#!/bin/sh
-if [ "$1" = "--instance" ]; then
-  shift 2
-fi
-if [ "$1" = "activewindow" ] && [ "$2" = "-j" ]; then
-  printf '{"title":"Doc","class":"Editor","address":"0xabc"}'
-  exit 0
-fi
-exit 1
-""",
-            encoding="utf-8",
-        )
-        script_path.chmod(0o755)
-
-        proc = subprocess.Popen(
-            [
-                str(binary),
-                "--log-dir",
-                str(log_dir),
-                "--snapshot-dir",
-                str(snap_dir),
-                "--hyprctl",
-                str(script_path),
-                "--hypr-signature",
-                str(sig_file),
-                "--snapshot-interval",
-                "0",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert proc.stdin is not None
-
-        send_key(proc.stdin, KEY_A, 1)
-        send_key(proc.stdin, KEY_A, 0)
-        proc.stdin.close()
-        proc.wait(timeout=5)
-
-        assert proc.returncode == 0, proc.stderr.read().decode()
-
-        files = list(log_dir.glob("*.jsonl"))
-        assert files, "no hyprctl log generated"
-        events = [json.loads(line) for line in files[0].read_text().splitlines()]
-        focus_events = [e for e in events if e.get("event") == "focus"]
-        assert focus_events, "missing focus event for custom hyprctl"
-        assert "Doc" in focus_events[-1].get("window", "")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        log_dir = Path(tmp) / "logs"
-        snap_dir = Path(tmp) / "snapshots"
         time_file = Path(tmp) / "time.txt"
         log_dir.mkdir()
         snap_dir.mkdir()
@@ -401,8 +338,6 @@ exit 1
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -454,77 +389,6 @@ exit 1
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         snap_dir = Path(tmp) / "snapshots"
-        sig_file = Path(tmp) / "sig"
-        time_file = Path(tmp) / "time.txt"
-        log_dir.mkdir()
-        snap_dir.mkdir()
-        sig_file.write_text("signature", encoding="utf-8")
-
-        base_dt = datetime.datetime(2021, 1, 3, 12, 0, tzinfo=datetime.timezone.utc)
-        write_fake_time(time_file, base_dt, monotonic=3000.0)
-
-        hyprctl_path = Path(tmp) / "hyprctl"
-        hyprctl_path.write_text(
-            """#!/bin/sh
-if [ "$1" = "--instance" ]; then
-  shift 2
-fi
-if [ "$1" = "activewindow" ] && [ "$2" = "-j" ]; then
-  printf '{"title":"Stub","class":"Editor","address":"0xbeef"}'
-  exit 0
-fi
-exit 1
-""",
-            encoding="utf-8",
-        )
-        hyprctl_path.chmod(0o755)
-
-        env = os.environ.copy()
-        env["PATH"] = ""
-        env["SCRIBE_TAP_TEST_HYPRCTL"] = str(hyprctl_path)
-        env["SCRIBE_TAP_TEST_TIME_FILE"] = str(time_file)
-
-        proc = subprocess.Popen(
-            [
-                str(binary),
-                "--log-dir",
-                str(log_dir),
-                "--snapshot-dir",
-                str(snap_dir),
-                "--hypr-signature",
-                str(sig_file),
-                "--snapshot-interval",
-                "0",
-                "--context-refresh",
-                "0",
-                "--translate",
-                "raw",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        assert proc.stdin is not None
-
-        send_key(proc.stdin, KEY_A, 1)
-        send_key(proc.stdin, KEY_A, 0)
-        proc.stdin.flush()
-        proc.stdin.close()
-        proc.wait(timeout=5)
-
-        assert proc.returncode == 0, proc.stderr.read().decode()
-
-        wait_for(lambda: (log_dir / "2021-01-03.jsonl").exists())
-        focus_lines = (log_dir / "2021-01-03.jsonl").read_text().splitlines()
-        focus_records = [json.loads(line) for line in focus_lines]
-        focus_events = [rec for rec in focus_records if rec.get("event") == "focus"]
-        assert focus_events, "expected focus event with fallback hyprctl"
-        assert focus_events[-1].get("window") == "Stub (Editor) [0xbeef]"
-
-    with tempfile.TemporaryDirectory() as tmp:
-        log_dir = Path(tmp) / "logs"
-        snap_dir = Path(tmp) / "snapshots"
         time_file = Path(tmp) / "time.txt"
         log_dir.mkdir()
         snap_dir.mkdir()
@@ -542,8 +406,6 @@ exit 1
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -590,57 +452,6 @@ exit 1
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         snap_dir = Path(tmp) / "snapshots"
-        sig_file = Path(tmp) / "sig"
-        stub_dir = Path(tmp) / "bin"
-        log_dir.mkdir()
-        snap_dir.mkdir()
-        stub_dir.mkdir()
-        sig_file.write_text("signature", encoding="utf-8")
-
-        script_path = stub_dir / "hyprctl"
-        script_path.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        script_path.chmod(0o755)
-
-        env = os.environ.copy()
-        env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
-
-        proc = subprocess.Popen(
-            [
-                str(binary),
-                "--log-dir",
-                str(log_dir),
-                "--snapshot-dir",
-                str(snap_dir),
-                "--hypr-signature",
-                str(sig_file),
-                "--snapshot-interval",
-                "0",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        assert proc.stdin is not None
-
-        send_key(proc.stdin, KEY_A, 1)
-        send_key(proc.stdin, KEY_A, 0)
-        proc.stdin.close()
-        proc.wait(timeout=5)
-
-        assert proc.returncode == 0, proc.stderr.read().decode()
-
-        files = list(log_dir.glob("*.jsonl"))
-        assert files, "no logs captured when hyprctl fails"
-        events = [json.loads(line) for line in files[0].read_text().splitlines()]
-        focus_events = [e for e in events if e.get("event") == "focus"]
-        assert any(e.get("window") == "unknown" for e in focus_events), "hyprctl failure should reset context"
-        press = [e for e in events if e.get("event") == "press"]
-        assert all(e.get("window") == "unknown" for e in press), "press events should log unknown context on failure"
-
-    with tempfile.TemporaryDirectory() as tmp:
-        log_dir = Path(tmp) / "logs"
-        snap_dir = Path(tmp) / "snapshots"
         log_dir.mkdir()
         snap_dir.mkdir()
 
@@ -651,8 +462,6 @@ exit 1
                 str(log_dir),
                 "--snapshot-dir",
                 str(snap_dir),
-                "--context",
-                "none",
                 "--clipboard",
                 "off",
                 "--snapshot-interval",
@@ -683,6 +492,72 @@ exit 1
         assert snapshot_files, "no snapshot files for capslock repeat"
         content = snapshot_files[0].read_text()
         assert content == "A", f"capslock repeat should preserve uppercase translation, got {content!r}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        snap_dir = Path(tmp) / "snapshots"
+        log_dir.mkdir()
+        snap_dir.mkdir()
+
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "--log-dir",
+                str(log_dir),
+                "--snapshot-dir",
+                str(snap_dir),
+                "--clipboard",
+                "off",
+                "--snapshot-interval",
+                "0",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+
+        # Interleave a keystroke with mouse motion, a button click, and a
+        # scroll -- exercises the EV_KEY/EV_REL dispatch split in
+        # state_process_input() and confirms mouse buttons never fall
+        # through into the keystroke text-buffer path.
+        send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 0)
+        proc.stdin.write(pack_event(0, 0, EV_REL, REL_X, 5))
+        proc.stdin.write(pack_event(0, 0, EV_REL, REL_Y, 2))
+        proc.stdin.write(pack_event(0, 0, EV_SYN, 0, 0))
+        proc.stdin.write(pack_event(0, 0, EV_KEY, BTN_LEFT, 1))
+        proc.stdin.write(pack_event(0, 0, EV_SYN, 0, 0))
+        proc.stdin.write(pack_event(0, 0, EV_KEY, BTN_LEFT, 0))
+        proc.stdin.write(pack_event(0, 0, EV_SYN, 0, 0))
+        proc.stdin.write(pack_event(0, 0, EV_REL, REL_WHEEL, -1))
+        proc.stdin.write(pack_event(0, 0, EV_SYN, 0, 0))
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0, proc.stderr.read().decode()
+
+        files = list(log_dir.glob("*.jsonl"))
+        assert files, "no log files for pointer capture run"
+        events = [json.loads(line) for line in files[0].read_text().splitlines()]
+
+        press = [e for e in events if e.get("event") == "press"]
+        assert any(e.get("keycode") == "KEY_A" for e in press), "keystroke still captured alongside pointer events"
+
+        rel = [e for e in events if e.get("event") == "pointer_rel"]
+        assert any(e.get("code") == "REL_X" and e.get("value") == 5 for e in rel)
+        assert any(e.get("code") == "REL_Y" and e.get("value") == 2 for e in rel)
+        assert any(e.get("code") == "REL_WHEEL" and e.get("value") == -1 for e in rel), "scroll not captured"
+
+        button_press = [e for e in events if e.get("event") == "pointer_button_press"]
+        button_release = [e for e in events if e.get("event") == "pointer_button_release"]
+        assert any(e.get("code") == "BTN_LEFT" for e in button_press), "button press not captured"
+        assert any(e.get("code") == "BTN_LEFT" for e in button_release), "button release not captured"
+
+        # Structural guarantee: a mouse button must never be misrouted
+        # through the keyboard path and show up as a "press"/keycode event.
+        assert not any(e.get("keycode", "").startswith("BTN_") for e in press), \
+            "mouse button leaked into the keystroke-content event stream"
 
     return 0
 

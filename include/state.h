@@ -42,17 +42,12 @@ enum LogMode {
 typedef struct StateConfig {
     const char *log_dir;
     const char *snapshot_dir;
-    const char *hyprctl_cmd;
     double snapshot_interval;
-    double context_refresh;
     enum ClipboardMode clipboard_mode;
     enum TranslateMode translate_mode;
     enum LogMode log_mode;
-    bool context_enabled;
     const char *xkb_layout;
     const char *xkb_variant;
-    const char *hypr_signature_path;
-    const char *hypr_user;
 } StateConfig;
 
 enum { STATE_MOD_COUNT = 4 };
@@ -61,13 +56,10 @@ typedef struct State {
     char session_id[64];
     char log_dir[PATH_MAX];
     char snapshot_dir[PATH_MAX];
-    char hyprctl_cmd[PATH_MAX];
     double snapshot_interval;
-    double context_refresh;
     enum ClipboardMode clipboard_mode;
     enum TranslateMode translate_mode;
     enum LogMode log_mode;
-    bool context_enabled;
     const char *xkb_layout;
     const char *xkb_variant;
 
@@ -76,15 +68,12 @@ typedef struct State {
     int log_month;
     int log_day;
     BufferList buffers;
-    char current_context[512];
-    double last_context_poll;
 
     bool capslock;
     bool modifiers[STATE_MOD_COUNT];
     struct xkb_context *xkb_ctx;
     struct xkb_keymap *xkb_keymap;
     struct xkb_state *xkb_state;
-    char *hypr_signature;
     CommandExecutor *executor;
 } State;
 

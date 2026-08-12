@@ -2,9 +2,7 @@
 #include "state.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
-#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,11 +25,12 @@ enum ModifierIndex {
     MOD_COUNT = STATE_MOD_COUNT
 };
 
-static void log_event(State *state, const char *event, const char *window,
+static void log_event(State *state, const char *event, bool flush,
                       const char *keycode, bool changed, const char *buffer_text,
                       const char *clipboard_text);
+static void log_pointer_event(State *state, const char *event, const char *code_name,
+                              int value, bool flush);
 static void write_snapshot(State *state, Buffer *buf, bool force);
-static void update_context(State *state);
 static void update_modifiers(State *state, int code, int value);
 static bool open_log_file_for_tm(State *state, const struct tm *tm);
 static void rotate_log_if_needed(State *state);
@@ -49,191 +48,6 @@ static void copy_path_checked(char *dest, size_t dest_len, const char *src, cons
         fprintf(stderr, "%s path too long\n", label);
         exit(1);
     }
-}
-
-static bool resolve_command_in_path(const char *name, char *out, size_t out_len) {
-    if (!name || !*name) {
-        return false;
-    }
-    if (strchr(name, '/')) {
-        if (access(name, X_OK) == 0) {
-            if (out && out_len) {
-                int written = snprintf(out, out_len, "%s", name);
-                if (written < 0 || (size_t)written >= out_len) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-
-    const char *path_env = getenv("PATH");
-    if (!path_env || !*path_env) {
-        return false;
-    }
-
-    const char *cursor = path_env;
-    while (*cursor) {
-        const char *sep = strchr(cursor, ':');
-        size_t segment_len = sep ? (size_t)(sep - cursor) : strlen(cursor);
-        char dir[PATH_MAX];
-        if (segment_len >= sizeof(dir)) {
-            /* skip unreasonable PATH entries */
-        } else {
-            if (segment_len == 0) {
-                dir[0] = '.';
-                dir[1] = '\0';
-            } else {
-                memcpy(dir, cursor, segment_len);
-                dir[segment_len] = '\0';
-            }
-            char candidate[PATH_MAX];
-            int written = snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
-            if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
-                if (out && out_len) {
-                    int copy_written = snprintf(out, out_len, "%s", candidate);
-                    if (copy_written < 0 || (size_t)copy_written >= out_len) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-        }
-        if (!sep) {
-            break;
-        }
-        cursor = sep + 1;
-    }
-
-    return false;
-}
-
-static void maybe_resolve_hyprctl(State *state, const StateConfig *config) {
-    if (!state) return;
-
-    const char *test_override = getenv("SCRIBE_TAP_TEST_HYPRCTL");
-    if (test_override && *test_override) {
-        if (access(test_override, X_OK) == 0) {
-            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), test_override, "hyprctl command");
-            return;
-        }
-    }
-
-    char resolved[PATH_MAX];
-    if (resolve_command_in_path(state->hyprctl_cmd, resolved, sizeof(resolved))) {
-        copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), resolved, "hyprctl command");
-        return;
-    }
-
-    if (!config || !config->hypr_user) {
-        return;
-    }
-
-    struct passwd *pw = getpwnam(config->hypr_user);
-    if (!pw) {
-        return;
-    }
-
-    const char *user = (pw->pw_name && pw->pw_name[0]) ? pw->pw_name : config->hypr_user;
-    const char *home = pw->pw_dir;
-    char candidate[PATH_MAX];
-
-    if (user) {
-        int written = snprintf(candidate, sizeof(candidate), "/etc/profiles/per-user/%s/bin/hyprctl", user);
-        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
-            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
-            return;
-        }
-    }
-
-    if (home && *home) {
-        int written = snprintf(candidate, sizeof(candidate), "%s/.nix-profile/bin/hyprctl", home);
-        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
-            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
-            return;
-        }
-        written = snprintf(candidate, sizeof(candidate), "%s/.local/bin/hyprctl", home);
-        if (written >= 0 && (size_t)written < sizeof(candidate) && access(candidate, X_OK) == 0) {
-            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), candidate, "hyprctl command");
-            return;
-        }
-    }
-
-    const char *system_candidates[] = {
-        "/run/current-system/sw/bin/hyprctl",
-        "/usr/bin/hyprctl",
-        "/usr/local/bin/hyprctl",
-    };
-    for (size_t i = 0; i < sizeof(system_candidates) / sizeof(system_candidates[0]); ++i) {
-        if (access(system_candidates[i], X_OK) == 0) {
-            copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), system_candidates[i], "hyprctl command");
-            return;
-        }
-    }
-}
-
-static char *load_hypr_signature_for_user(const char *user) {
-    if (!user) return NULL;
-    struct passwd *pw = getpwnam(user);
-    if (!pw) return NULL;
-    const uid_t uid = pw->pw_uid;
-    char path[PATH_MAX];
-    const char *home = pw->pw_dir;
-    const char *home_candidates[] = {
-        "%s/.cache/hyprland/instance",
-        "%s/.cache/hyprland/hyprland_instance",
-        "%s/.cache/hyprland/hyprland.conf-instance",
-    };
-    for (size_t i = 0; i < sizeof(home_candidates) / sizeof(home_candidates[0]); ++i) {
-        if (!home) break;
-        snprintf(path, sizeof(path), home_candidates[i], home);
-        char *value = util_read_trimmed_file(path);
-        if (value && *value) return value;
-        free(value);
-    }
-    const char *runtime_candidates[] = {
-        "/run/user/%u/hypr/instance",
-        "/run/user/%u/hypr/hyprland_instance",
-    };
-    for (size_t i = 0; i < sizeof(runtime_candidates) / sizeof(runtime_candidates[0]); ++i) {
-        snprintf(path, sizeof(path), runtime_candidates[i], uid);
-        char *value = util_read_trimmed_file(path);
-        if (value && *value) return value;
-        free(value);
-    }
-    return NULL;
-}
-
-static char *auto_detect_hypr_signature(void) {
-    DIR *dir = opendir("/run/user");
-    if (!dir) return NULL;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir))) {
-        if (!entry->d_name[0] || entry->d_name[0] == '.') {
-            continue;
-        }
-        char *end = NULL;
-        errno = 0;
-        unsigned long uid = strtoul(entry->d_name, &end, 10);
-        if (errno != 0 || !end || *end != '\0') {
-            continue;
-        }
-        struct passwd *pw = getpwuid((uid_t)uid);
-        if (!pw || !pw->pw_name) {
-            continue;
-        }
-        char *value = load_hypr_signature_for_user(pw->pw_name);
-        if (value && *value) {
-            closedir(dir);
-            return value;
-        }
-        free(value);
-    }
-
-    closedir(dir);
-    return NULL;
 }
 
 static void init_xkb(State *state) {
@@ -280,32 +94,13 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
 
     copy_path_checked(state->log_dir, sizeof(state->log_dir), config->log_dir, "log directory");
     copy_path_checked(state->snapshot_dir, sizeof(state->snapshot_dir), config->snapshot_dir, "snapshot directory");
-    copy_path_checked(state->hyprctl_cmd, sizeof(state->hyprctl_cmd), config->hyprctl_cmd, "hyprctl command");
-    maybe_resolve_hyprctl(state, config);
     state->snapshot_interval = config->snapshot_interval;
-    state->context_refresh = config->context_refresh;
     state->clipboard_mode = config->clipboard_mode;
     state->translate_mode = config->translate_mode;
     state->log_mode = config->log_mode;
-    state->context_enabled = config->context_enabled;
     state->xkb_layout = config->xkb_layout;
     state->xkb_variant = config->xkb_variant;
     state->executor = executor;
-
-    if (config->hypr_signature_path) {
-        state->hypr_signature = util_read_trimmed_file(config->hypr_signature_path);
-    } else if (config->hypr_user) {
-        state->hypr_signature = load_hypr_signature_for_user(config->hypr_user);
-    } else {
-        const char *env_sig = getenv("HYPRLAND_INSTANCE_SIGNATURE");
-        if (env_sig && *env_sig) {
-            state->hypr_signature = util_string_dup(env_sig);
-        }
-    }
-
-    if (!state->hypr_signature) {
-        state->hypr_signature = auto_detect_hypr_signature();
-    }
 
     struct timespec ts;
     util_get_realtime(&ts);
@@ -327,12 +122,12 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
 
     init_xkb(state);
 
-    log_event(state, "start", NULL, NULL, false, NULL, NULL);
+    log_event(state, "start", true, NULL, false, NULL, NULL);
 }
 
 void state_cleanup(State *state) {
     state_flush_idle(state, true);
-    log_event(state, "stop", NULL, NULL, false, NULL, NULL);
+    log_event(state, "stop", true, NULL, false, NULL, NULL);
     if (state->log_file) fclose(state->log_file);
     buffer_list_free(&state->buffers);
 #if STATE_HAVE_XKBCOMMON
@@ -340,7 +135,6 @@ void state_cleanup(State *state) {
     if (state->xkb_keymap) xkb_keymap_unref(state->xkb_keymap);
     if (state->xkb_ctx) xkb_context_unref(state->xkb_ctx);
 #endif
-    free(state->hypr_signature);
 }
 
 int state_poll_timeout_ms(const State *state) {
@@ -389,6 +183,64 @@ static const char *keycode_name(int code) {
     }
     snprintf(buf, sizeof(buf), "KEY_%d", code);
     return buf;
+}
+
+/* True for the evdev BTN_MOUSE-group codes (mouse/trackball buttons) --
+   deliberately narrow (not the whole BTN_* namespace, which also covers
+   gamepad/joystick/tablet/touch buttons interleaved in the same numeric
+   space) so a plain mouse click is never misrouted through the keyboard
+   text-buffer path in process_key(). */
+static bool is_pointer_button(int code) {
+    return code >= BTN_LEFT && code <= BTN_TASK;
+}
+
+static const char *button_name(int code) {
+    static char buf[32];
+    switch (code) {
+        case BTN_LEFT: return "BTN_LEFT";
+        case BTN_RIGHT: return "BTN_RIGHT";
+        case BTN_MIDDLE: return "BTN_MIDDLE";
+        case BTN_SIDE: return "BTN_SIDE";
+        case BTN_EXTRA: return "BTN_EXTRA";
+        case BTN_FORWARD: return "BTN_FORWARD";
+        case BTN_BACK: return "BTN_BACK";
+        case BTN_TASK: return "BTN_TASK";
+        default:
+            snprintf(buf, sizeof(buf), "BTN_%d", code);
+            return buf;
+    }
+}
+
+static const char *rel_axis_name(int code) {
+    static char buf[32];
+    switch (code) {
+        case REL_X: return "REL_X";
+        case REL_Y: return "REL_Y";
+        case REL_Z: return "REL_Z";
+        case REL_WHEEL: return "REL_WHEEL";
+        case REL_HWHEEL: return "REL_HWHEEL";
+#ifdef REL_WHEEL_HI_RES
+        case REL_WHEEL_HI_RES: return "REL_WHEEL_HI_RES";
+#endif
+#ifdef REL_HWHEEL_HI_RES
+        case REL_HWHEEL_HI_RES: return "REL_HWHEEL_HI_RES";
+#endif
+        default:
+            snprintf(buf, sizeof(buf), "REL_%d", code);
+            return buf;
+    }
+}
+
+static const char *abs_axis_name(int code) {
+    static char buf[32];
+    switch (code) {
+        case ABS_X: return "ABS_X";
+        case ABS_Y: return "ABS_Y";
+        case ABS_PRESSURE: return "ABS_PRESSURE";
+        default:
+            snprintf(buf, sizeof(buf), "ABS_%d", code);
+            return buf;
+    }
 }
 
 static char lowercase_char_for_key(int code) {
@@ -547,126 +399,6 @@ static void update_modifiers(State *state, int code, int value) {
     }
 }
 
-static void trim_newline(char *s) {
-    util_trim_newline(s);
-}
-
-static void extract_json_field(const char *json, const char *field, char *out, size_t out_len) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\"", field);
-    const char *pos = strstr(json, needle);
-    if (!pos) {
-        out[0] = '\0';
-        return;
-    }
-    pos = strchr(pos, ':');
-    if (!pos) {
-        out[0] = '\0';
-        return;
-    }
-    pos = strchr(pos, '"');
-    if (!pos) {
-        out[0] = '\0';
-        return;
-    }
-    pos++;
-    size_t j = 0;
-    while (*pos && *pos != '"' && j + 1 < out_len) {
-        if (*pos == '\\' && pos[1]) {
-            pos++;
-        }
-        out[j++] = *pos++;
-    }
-    out[j] = '\0';
-    trim_newline(out);
-}
-
-static void reset_context_on_failure(State *state) {
-    const char *fallback = "unknown";
-    if (strcmp(state->current_context, fallback) == 0) {
-        return;
-    }
-
-    char previous[sizeof(state->current_context)];
-    strncpy(previous, state->current_context, sizeof(previous));
-    previous[sizeof(previous) - 1] = '\0';
-
-    strncpy(state->current_context, fallback, sizeof(state->current_context));
-    state->current_context[sizeof(state->current_context) - 1] = '\0';
-
-    if (previous[0]) {
-        Buffer *prev = buffer_lookup(&state->buffers, previous, false);
-        if (prev) {
-            write_snapshot(state, prev, true);
-        }
-    }
-
-    log_event(state, "focus", state->current_context, NULL, false, NULL, NULL);
-}
-
-static void update_context(State *state) {
-    double now = util_now_seconds();
-    if (!state->context_enabled) {
-        if (state->current_context[0] == '\0') {
-            strncpy(state->current_context, "global", sizeof(state->current_context));
-            state->current_context[sizeof(state->current_context) - 1] = '\0';
-        }
-        return;
-    }
-    if (now - state->last_context_poll < state->context_refresh) {
-        return;
-    }
-    state->last_context_poll = now;
-
-    const char *argv[6];
-    size_t argc = 0;
-    argv[argc++] = state->hyprctl_cmd;
-    if (state->hypr_signature && *state->hypr_signature) {
-        argv[argc++] = "--instance";
-        argv[argc++] = state->hypr_signature;
-    }
-    argv[argc++] = "activewindow";
-    argv[argc++] = "-j";
-    argv[argc] = NULL;
-
-    char *json = command_executor_capture(state->executor, argv);
-    if (!json) {
-        reset_context_on_failure(state);
-        return;
-    }
-
-    char title[256] = "untitled";
-    char clazz[128] = "unknown";
-    char address[64] = "0x0";
-
-    extract_json_field(json, "title", title, sizeof(title));
-    extract_json_field(json, "class", clazz, sizeof(clazz));
-    extract_json_field(json, "address", address, sizeof(address));
-
-    char combined[sizeof(state->current_context)];
-    snprintf(combined, sizeof(combined), "%s (%s) [%s]", title, clazz, address);
-    trim_newline(combined);
-
-    if (strcmp(combined, state->current_context) != 0) {
-        char previous[sizeof(state->current_context)];
-        strncpy(previous, state->current_context, sizeof(previous));
-        previous[sizeof(previous) - 1] = '\0';
-
-        strncpy(state->current_context, combined, sizeof(state->current_context));
-        state->current_context[sizeof(state->current_context) - 1] = '\0';
-
-        if (previous[0]) {
-            Buffer *prev = buffer_lookup(&state->buffers, previous, false);
-            if (prev) {
-                write_snapshot(state, prev, true);
-            }
-        }
-        log_event(state, "focus", state->current_context, NULL, false, NULL, NULL);
-    }
-
-    free(json);
-}
-
 static bool open_log_file_for_tm(State *state, const struct tm *tm) {
     if (!state || !tm) return false;
 
@@ -722,7 +454,7 @@ static void rotate_log_if_needed(State *state) {
     }
 }
 
-static void log_event(State *state, const char *event, const char *window,
+static void log_event(State *state, const char *event, bool flush,
                       const char *keycode, bool changed, const char *buffer_text,
                       const char *clipboard_text) {
     rotate_log_if_needed(state);
@@ -738,11 +470,6 @@ static void log_event(State *state, const char *event, const char *window,
             "{\"ts\":\"%s\",\"event\":\"%s\",\"session\":\"%s\"",
             ts, event, state->session_id);
 
-    if (window) {
-        char *window_json = util_json_escape(window);
-        fprintf(state->log_file, ",\"window\":%s", window_json);
-        free(window_json);
-    }
     if (keycode) {
         fprintf(state->log_file, ",\"keycode\":\"%s\"", keycode);
     }
@@ -758,7 +485,31 @@ static void log_event(State *state, const char *event, const char *window,
         free(clip_json);
     }
     fputs("}\n", state->log_file);
-    fflush(state->log_file);
+    if (flush) {
+        fflush(state->log_file);
+    }
+}
+
+/* Pointer/other-device events (motion, buttons, generic axes) have a
+   different shape than keystroke events and, for high-rate motion, a
+   different durability tradeoff: keystroke content is fsync'd on every
+   write (a lost keystroke is a lost fact), but relative-motion deltas
+   arriving at up to ~1000Hz would thrash the disk if force-flushed per
+   line -- those rely on stdio's own buffering plus the periodic flush
+   that button/scroll events and log rotation already trigger. */
+static void log_pointer_event(State *state, const char *event, const char *code_name,
+                              int value, bool flush) {
+    rotate_log_if_needed(state);
+    if (!state->log_file) return;
+    if (state->log_mode == LOG_MODE_SNAPSHOTS) return;
+    char ts[64];
+    util_iso8601(ts, sizeof(ts));
+    fprintf(state->log_file,
+            "{\"ts\":\"%s\",\"event\":\"%s\",\"session\":\"%s\",\"code\":\"%s\",\"value\":%d}\n",
+            ts, event, state->session_id, code_name, value);
+    if (flush) {
+        fflush(state->log_file);
+    }
 }
 
 static void write_snapshot(State *state, Buffer *buf, bool force) {
@@ -781,7 +532,7 @@ static void write_snapshot(State *state, Buffer *buf, bool force) {
     fwrite(buf->text, 1, buf->len, f);
     fclose(f);
     buf->last_snapshot = now;
-    log_event(state, "snapshot", buf->context, NULL, false, buf->text, NULL);
+    log_event(state, "snapshot", true, NULL, false, buf->text, NULL);
 }
 
 void state_flush_idle(State *state, bool force_all) {
@@ -827,11 +578,16 @@ static char *read_clipboard(State *state) {
     return clip;
 }
 
-static void process_key(State *state, int code, const char *key_name, const char *utf8_text, char *dynamic_text) {
-    update_context(state);
+/* Single session-scoped buffer: scribe-tap no longer partitions keystroke
+   buffering by compositor window (that was a Hyprland-polling feature that
+   never worked correctly against this host's actual runtime layout -- see
+   git history). Window/app attribution, if wanted later, is a downstream
+   join against ActivityWatch's focus events by timestamp, not something
+   this process should re-derive by talking to the compositor itself. */
+#define SCRIBE_TAP_BUFFER_KEY "session"
 
-    const char *context = state->current_context[0] ? state->current_context : "unknown";
-    Buffer *buf = buffer_lookup(&state->buffers, context, true);
+static void process_key(State *state, int code, const char *key_name, const char *utf8_text, char *dynamic_text) {
+    Buffer *buf = buffer_lookup(&state->buffers, SCRIBE_TAP_BUFFER_KEY, true);
 
     char appended[2] = {0};
     bool changed = false;
@@ -905,17 +661,13 @@ static void process_key(State *state, int code, const char *key_name, const char
     }
 
     if (state->log_mode != LOG_MODE_SNAPSHOTS) {
-        log_event(state, "press", buf->context, key_name, changed, NULL, clipboard);
+        log_event(state, "press", true, key_name, changed, NULL, clipboard);
     }
 
     free(clipboard);
 }
 
-void state_process_input(State *state, const struct input_event *event) {
-    if (!event || event->type != EV_KEY) {
-        return;
-    }
-
+static void process_keyboard_key(State *state, const struct input_event *event) {
     const char *name = keycode_name(event->code);
 
     if (event->value == 1 || event->value == 2) {
@@ -969,5 +721,66 @@ void state_process_input(State *state, const struct input_event *event) {
 #endif
         process_key(state, event->code, name, text_ptr, dynamic_buf);
         free(dynamic_buf);
+    }
+}
+
+/* Mouse button press/release. Logged like keystrokes (fsync'd every line --
+   button events are low-rate and each one is a discrete fact worth not
+   losing) but never touch the text buffer/snapshot machinery, which is
+   keystroke-content-specific. */
+static void process_pointer_button(State *state, const struct input_event *event) {
+    if (event->value != 0 && event->value != 1) {
+        return; /* ignore autorepeat (value==2), which evdev never emits for buttons anyway */
+    }
+    const char *ev = event->value ? "pointer_button_press" : "pointer_button_release";
+    log_pointer_event(state, ev, button_name(event->code), event->value, true);
+}
+
+/* Relative motion/scroll. Deliberately generic over the whole REL_* axis
+   space (not just X/Y/WHEEL) so an unrecognized axis is still captured
+   with its raw code number rather than silently dropped -- "if we can
+   grab it, capture it" per the design brief, applied consistently. Motion
+   (REL_X/REL_Y) does not force an fsync per event (see log_pointer_event);
+   wheel/scroll events do, since they are semantically closer to discrete
+   button-press facts than to a continuous position stream. */
+static void process_pointer_rel(State *state, const struct input_event *event) {
+    bool is_wheel = (event->code == REL_WHEEL || event->code == REL_HWHEEL);
+#ifdef REL_WHEEL_HI_RES
+    is_wheel = is_wheel || (event->code == REL_WHEEL_HI_RES);
+#endif
+#ifdef REL_HWHEEL_HI_RES
+    is_wheel = is_wheel || (event->code == REL_HWHEEL_HI_RES);
+#endif
+    log_pointer_event(state, "pointer_rel", rel_axis_name(event->code), event->value, is_wheel);
+}
+
+/* Absolute-position axes (touchpads/tablets/touchscreens riding the same
+   interception pipeline as a plain mouse). Same low-overhead flush policy
+   as relative motion. */
+static void process_pointer_abs(State *state, const struct input_event *event) {
+    log_pointer_event(state, "pointer_abs", abs_axis_name(event->code), event->value, false);
+}
+
+void state_process_input(State *state, const struct input_event *event) {
+    if (!event) {
+        return;
+    }
+
+    switch (event->type) {
+        case EV_KEY:
+            if (is_pointer_button(event->code)) {
+                process_pointer_button(state, event);
+            } else {
+                process_keyboard_key(state, event);
+            }
+            break;
+        case EV_REL:
+            process_pointer_rel(state, event);
+            break;
+        case EV_ABS:
+            process_pointer_abs(state, event);
+            break;
+        default:
+            break; /* EV_SYN, EV_MSC, etc. carry no capturable content of their own */
     }
 }

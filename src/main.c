@@ -240,10 +240,8 @@ static void handle_signal(int sig) {
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [--data-dir DIR] [--log-dir DIR] [--snapshot-dir DIR] [--snapshot-interval SEC]\n"
-            "           [--clipboard auto|off] [--context-refresh SEC] [--context hyprland|none]\n"
-            "           [--log-mode events|snapshots|both] [--translate xkb|raw]\n"
-            "           [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n"
-            "           [--hyprctl CMD] [--hypr-signature PATH] [--hypr-user USER]\n",
+            "           [--clipboard auto|off] [--log-mode events|snapshots|both]\n"
+            "           [--translate xkb|raw] [--xkb-layout LAYOUT] [--xkb-variant VARIANT]\n",
             prog);
 }
 
@@ -254,17 +252,12 @@ int main(int argc, char **argv) {
     bool data_dir_explicit = false;
     bool log_dir_explicit = false;
     bool snapshot_dir_explicit = false;
-    const char *hyprctl_cmd = "hyprctl";
     double snapshot_interval = 5.0;
-    double context_refresh = 0.4;
     enum ClipboardMode clipboard_mode = CLIPBOARD_AUTO;
-    bool context_enabled = true;
     enum TranslateMode translate_mode = TRANSLATE_XKB;
     enum LogMode log_mode = LOG_MODE_BOTH;
     const char *xkb_layout = NULL;
     const char *xkb_variant = NULL;
-    const char *hypr_signature_path = NULL;
-    const char *hypr_user = NULL;
 
     char log_dir_buf[PATH_MAX] = {0};
     char snapshot_dir_buf[PATH_MAX] = {0};
@@ -281,8 +274,6 @@ int main(int argc, char **argv) {
             data_dir_explicit = true;
         } else if (strcmp(argv[i], "--snapshot-interval") == 0 && i + 1 < argc) {
             snapshot_interval = atof(argv[++i]);
-        } else if (strcmp(argv[i], "--context-refresh") == 0 && i + 1 < argc) {
-            context_refresh = atof(argv[++i]);
         } else if (strcmp(argv[i], "--clipboard") == 0 && i + 1 < argc) {
             const char *mode = argv[++i];
             if (strcmp(mode, "auto") == 0) {
@@ -291,18 +282,6 @@ int main(int argc, char **argv) {
                 clipboard_mode = CLIPBOARD_OFF;
             } else {
                 fprintf(stderr, "Invalid clipboard mode: %s\n", mode);
-                return 1;
-            }
-        } else if (strcmp(argv[i], "--hyprctl") == 0 && i + 1 < argc) {
-            hyprctl_cmd = argv[++i];
-        } else if (strcmp(argv[i], "--context") == 0 && i + 1 < argc) {
-            const char *mode = argv[++i];
-            if (strcmp(mode, "hyprland") == 0) {
-                context_enabled = true;
-            } else if (strcmp(mode, "none") == 0) {
-                context_enabled = false;
-            } else {
-                fprintf(stderr, "Invalid context mode: %s\n", mode);
                 return 1;
             }
         } else if (strcmp(argv[i], "--log-mode") == 0 && i + 1 < argc) {
@@ -331,10 +310,6 @@ int main(int argc, char **argv) {
             xkb_layout = argv[++i];
         } else if (strcmp(argv[i], "--xkb-variant") == 0 && i + 1 < argc) {
             xkb_variant = argv[++i];
-        } else if (strcmp(argv[i], "--hypr-signature") == 0 && i + 1 < argc) {
-            hypr_signature_path = argv[++i];
-        } else if (strcmp(argv[i], "--hypr-user") == 0 && i + 1 < argc) {
-            hypr_user = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -371,17 +346,12 @@ int main(int argc, char **argv) {
     StateConfig config = {
         .log_dir = log_dir,
         .snapshot_dir = snapshot_dir,
-        .hyprctl_cmd = hyprctl_cmd,
         .snapshot_interval = snapshot_interval,
-        .context_refresh = context_refresh,
         .clipboard_mode = clipboard_mode,
         .translate_mode = translate_mode,
         .log_mode = log_mode,
-        .context_enabled = context_enabled,
         .xkb_layout = xkb_layout,
         .xkb_variant = xkb_variant,
-        .hypr_signature_path = hypr_signature_path,
-        .hypr_user = hypr_user,
     };
 
     CommandExecutor executor;
