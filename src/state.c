@@ -454,6 +454,45 @@ static void rotate_log_if_needed(State *state) {
     }
 }
 
+/* sinnix-7dwp: two independent scribe-tap processes (keyboard pipeline,
+   mouse pipeline) fopen(path, "a") the SAME daily JSONL file and were each
+   composing one record via multiple buffered stdio calls (fprintf x N +
+   fputs), then fflush()ing at their own cadence. Buffered stdio gives no
+   atomicity guarantee across those calls, and log_pointer_event's
+   deliberate flush=false for motion events (see its comment) widened the
+   window further -- the two processes' partial in-flight records could
+   (and, per the bead's byte-level evidence, did) land underneath one
+   another's write(2)s and torn/interleave.
+   Fix: compose the FULL record in memory first, then hand it to the
+   kernel as exactly one write(2) syscall on the O_APPEND fd. A single
+   write() to a regular local (non-NFS) file is atomic against other
+   writers' write()s at the VFS layer regardless of size -- this is the
+   same guarantee syslog-style multi-writer append logging has relied on
+   for decades on Linux -- so this needs no flock() and no single-writer
+   funnel process, and preserves the pointer path's no-per-event-fsync
+   throughput characteristic (write() is inherently unbuffered; there is
+   no "sitting in a stdio buffer" window left to widen). */
+static bool log_write_line(State *state, const char *line, size_t len) {
+    if (!state->log_file) return false;
+    int fd = fileno(state->log_file);
+    ssize_t n = write(fd, line, len);
+    if (n < 0) {
+        perror("write log line");
+        return false;
+    }
+    if ((size_t)n != len) {
+        /* A genuine short write on a local regular file is abnormal (disk
+           full, quota, etc.) -- report it rather than retrying with a
+           second write() call, since a second call here would itself be
+           a second syscall and could interleave with a concurrent
+           writer's record, reintroducing exactly the bug this fixes. */
+        fprintf(stderr, "scribe-tap: short write to log (%zd of %zu bytes), record dropped\n",
+                n, len);
+        return false;
+    }
+    return true;
+}
+
 static void log_event(State *state, const char *event, bool flush,
                       const char *keycode, bool changed, const char *buffer_text,
                       const char *clipboard_text) {
@@ -466,37 +505,53 @@ static void log_event(State *state, const char *event, bool flush,
     char ts[64];
     util_iso8601(ts, sizeof(ts));
 
-    fprintf(state->log_file,
-            "{\"ts\":\"%s\",\"event\":\"%s\",\"session\":\"%s\"",
-            ts, event, state->session_id);
+    char *buffer_json = (is_snapshot && buffer_text) ? util_json_escape(buffer_text) : NULL;
+    char *clip_json = clipboard_text ? util_json_escape(clipboard_text) : NULL;
 
-    if (keycode) {
-        fprintf(state->log_file, ",\"keycode\":\"%s\"", keycode);
-    }
-    fprintf(state->log_file, ",\"changed\":%s", changed ? "true" : "false");
-    if (is_snapshot && buffer_text) {
-        char *buffer_json = util_json_escape(buffer_text);
-        fprintf(state->log_file, ",\"buffer\":%s", buffer_json);
+    /* Composed via open_memstream so unbounded buffer/clipboard content
+       (buffer.c grows Buffer.text with no fixed cap) can't overflow a
+       fixed-size stack buffer -- correctness matters more than avoiding
+       one malloc here, these are not the high-rate pointer events. */
+    char *line = NULL;
+    size_t line_len = 0;
+    FILE *mem = open_memstream(&line, &line_len);
+    if (!mem) {
+        perror("open_memstream");
         free(buffer_json);
-    }
-    if (clipboard_text) {
-        char *clip_json = util_json_escape(clipboard_text);
-        fprintf(state->log_file, ",\"clipboard\":%s", clip_json);
         free(clip_json);
+        return;
     }
-    fputs("}\n", state->log_file);
-    if (flush) {
-        fflush(state->log_file);
+
+    fprintf(mem, "{\"ts\":\"%s\",\"event\":\"%s\",\"session\":\"%s\"",
+            ts, event, state->session_id);
+    if (keycode) {
+        fprintf(mem, ",\"keycode\":\"%s\"", keycode);
     }
+    fprintf(mem, ",\"changed\":%s", changed ? "true" : "false");
+    if (buffer_json) {
+        fprintf(mem, ",\"buffer\":%s", buffer_json);
+    }
+    if (clip_json) {
+        fprintf(mem, ",\"clipboard\":%s", clip_json);
+    }
+    fputs("}\n", mem);
+    fclose(mem); /* flushes into line/line_len */
+
+    free(buffer_json);
+    free(clip_json);
+
+    log_write_line(state, line, line_len);
+    free(line);
+    (void)flush; /* write() above is already unbuffered; nothing left to flush */
 }
 
 /* Pointer/other-device events (motion, buttons, generic axes) have a
-   different shape than keystroke events and, for high-rate motion, a
-   different durability tradeoff: keystroke content is fsync'd on every
-   write (a lost keystroke is a lost fact), but relative-motion deltas
-   arriving at up to ~1000Hz would thrash the disk if force-flushed per
-   line -- those rely on stdio's own buffering plus the periodic flush
-   that button/scroll events and log rotation already trigger. */
+   different field shape than keystroke events, but the SAME durability
+   story now: every record here is one write(2) syscall regardless of
+   event type (see sinnix-7dwp comment below and on log_event), so there
+   is no separate stdio-buffer-vs-fsync tradeoff to make anymore -- the
+   `flush` parameter is kept only for call-site symmetry with log_event
+   and does nothing. */
 static void log_pointer_event(State *state, const char *event, const char *code_name,
                               int value, bool flush) {
     rotate_log_if_needed(state);
@@ -504,12 +559,26 @@ static void log_pointer_event(State *state, const char *event, const char *code_
     if (state->log_mode == LOG_MODE_SNAPSHOTS) return;
     char ts[64];
     util_iso8601(ts, sizeof(ts));
-    fprintf(state->log_file,
+    /* sinnix-7dwp: every field here is fixed/bounded (ts, short event/code
+       string literals, State.session_id[64], an int) -- a stack buffer is
+       safe and, unlike open_memstream's malloc, keeps this hot 1kHz path
+       allocation-free. See log_event's comment for why a single write(2)
+       of the fully-composed line (not per-field fprintf) is what actually
+       fixes the torn-write bug. */
+    char line[512];
+    int n = snprintf(line, sizeof(line),
             "{\"ts\":\"%s\",\"event\":\"%s\",\"session\":\"%s\",\"code\":\"%s\",\"value\":%d}\n",
             ts, event, state->session_id, code_name, value);
-    if (flush) {
-        fflush(state->log_file);
+    if (n < 0) {
+        perror("snprintf pointer log line");
+        return;
     }
+    if ((size_t)n >= sizeof(line)) {
+        fprintf(stderr, "scribe-tap: pointer log line truncated (%d bytes needed), record dropped\n", n);
+        return;
+    }
+    log_write_line(state, line, (size_t)n);
+    (void)flush; /* write() above is already unbuffered; nothing left to flush */
 }
 
 static void write_snapshot(State *state, Buffer *buf, bool force) {
