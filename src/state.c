@@ -27,7 +27,7 @@ enum ModifierIndex {
 
 static void log_event(State *state, const char *event, bool flush,
                       const char *keycode, bool changed, const char *buffer_text,
-                      const char *clipboard_text);
+                      const char *clipboard_text, const struct input_event *input);
 static void log_pointer_event(State *state, const char *event, const char *code_name,
                               int value, bool flush);
 static void write_snapshot(State *state, Buffer *buf, bool force);
@@ -122,12 +122,12 @@ void state_init(State *state, const StateConfig *config, CommandExecutor *execut
 
     init_xkb(state);
 
-    log_event(state, "start", true, NULL, false, NULL, NULL);
+    log_event(state, "start", true, NULL, false, NULL, NULL, NULL);
 }
 
 void state_cleanup(State *state) {
     state_flush_idle(state, true);
-    log_event(state, "stop", true, NULL, false, NULL, NULL);
+    log_event(state, "stop", true, NULL, false, NULL, NULL, NULL);
     if (state->log_file) fclose(state->log_file);
     buffer_list_free(&state->buffers);
 #if STATE_HAVE_XKBCOMMON
@@ -495,12 +495,11 @@ static bool log_write_line(State *state, const char *line, size_t len) {
 
 static void log_event(State *state, const char *event, bool flush,
                       const char *keycode, bool changed, const char *buffer_text,
-                      const char *clipboard_text) {
+                      const char *clipboard_text, const struct input_event *input) {
     rotate_log_if_needed(state);
     if (!state->log_file) return;
-    bool is_press = (event && strcmp(event, "press") == 0);
     bool is_snapshot = (event && strcmp(event, "snapshot") == 0);
-    if (is_press && state->log_mode == LOG_MODE_SNAPSHOTS) return;
+    if (input && state->log_mode == LOG_MODE_SNAPSHOTS) return;
     if (is_snapshot && state->log_mode == LOG_MODE_EVENTS) return;
     char ts[64];
     util_iso8601(ts, sizeof(ts));
@@ -526,6 +525,11 @@ static void log_event(State *state, const char *event, bool flush,
             ts, event, state->session_id);
     if (keycode) {
         fprintf(mem, ",\"keycode\":\"%s\"", keycode);
+    }
+    if (input) {
+        fprintf(mem, ",\"code\":%u,\"value\":%d,\"input_sec\":%lld,\"input_usec\":%lld",
+                (unsigned int)input->code, input->value,
+                (long long)input->input_event_sec, (long long)input->input_event_usec);
     }
     fprintf(mem, ",\"changed\":%s", changed ? "true" : "false");
     if (buffer_json) {
@@ -601,7 +605,7 @@ static void write_snapshot(State *state, Buffer *buf, bool force) {
     fwrite(buf->text, 1, buf->len, f);
     fclose(f);
     buf->last_snapshot = now;
-    log_event(state, "snapshot", true, NULL, false, buf->text, NULL);
+    log_event(state, "snapshot", true, NULL, false, buf->text, NULL, NULL);
 }
 
 void state_flush_idle(State *state, bool force_all) {
@@ -655,7 +659,8 @@ static char *read_clipboard(State *state) {
    this process should re-derive by talking to the compositor itself. */
 #define SCRIBE_TAP_BUFFER_KEY "session"
 
-static void process_key(State *state, int code, const char *key_name, const char *utf8_text, char *dynamic_text) {
+static void process_key(State *state, const struct input_event *input, const char *key_name, const char *utf8_text, char *dynamic_text) {
+    int code = input->code;
     Buffer *buf = buffer_lookup(&state->buffers, SCRIBE_TAP_BUFFER_KEY, true);
 
     char appended[2] = {0};
@@ -730,13 +735,14 @@ static void process_key(State *state, int code, const char *key_name, const char
     }
 
     if (state->log_mode != LOG_MODE_SNAPSHOTS) {
-        log_event(state, "press", true, key_name, changed, NULL, clipboard);
+        log_event(state, "press", true, key_name, changed, NULL, clipboard, input);
     }
 
     free(clipboard);
 }
 
 static void process_keyboard_key(State *state, const struct input_event *event) {
+    if (event->value < 0 || event->value > 2) return;
     const char *name = keycode_name(event->code);
 
     if (event->value == 1 || event->value == 2) {
@@ -746,7 +752,7 @@ static void process_keyboard_key(State *state, const struct input_event *event) 
     }
 
 #if STATE_HAVE_XKBCOMMON
-    if (state->translate_mode == TRANSLATE_XKB && state->xkb_state) {
+    if (state->translate_mode == TRANSLATE_XKB && state->xkb_state && event->value != 2) {
         enum xkb_key_direction dir = (event->value == 0) ? XKB_KEY_UP : XKB_KEY_DOWN;
         xkb_state_update_key(state->xkb_state, event->code + 8, dir);
     }
@@ -788,8 +794,10 @@ static void process_keyboard_key(State *state, const struct input_event *event) 
             }
         }
 #endif
-        process_key(state, event->code, name, text_ptr, dynamic_buf);
+        process_key(state, event, name, text_ptr, dynamic_buf);
         free(dynamic_buf);
+    } else {
+        log_event(state, "release", true, name, false, NULL, NULL, event);
     }
 }
 

@@ -105,6 +105,17 @@ event history: keystroke events use `event`/`keycode`/`changed`/optional `clipbo
 events use `event` (`pointer_button_press`/`_release`, `pointer_rel`, `pointer_abs`) plus
 `code` (the button/axis name) and `value`.
 
+Keyboard records include both edges: `press` has raw evdev `value` 1 (down)
+or 2 (autorepeat), and `release` has value 0. The existing `keycode` name is
+retained; keyboard `code` is the numeric evdev key code. Releases never alter
+the text buffer. Snapshot-only mode omits both keyboard edges.
+`ts` is the logger's wall-clock receipt time; `input_sec` and `input_usec`
+preserve the input frame's timestamp in its upstream clock domain, which
+must not be assumed to be UTC. Older records lack these fields and releases;
+their absence does not establish that a key stayed held. Capture begins at
+process start and cannot recover keys already held or events lost upstream.
+These are upstream input events, not proof of the text accepted by an app.
+
 Use the included replay helper to inspect logs (`scribe-tap-replay` when installed via Nix). It can list snapshots, tail events, or run interactively. Filter output by session id and optionally surface clipboard payloads:
 
 ```sh

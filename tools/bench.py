@@ -68,8 +68,6 @@ def run_case(binary: Path, name: str, payload: bytes, key_count: int, context_fl
             str(log_dir),
             "--snapshot-dir",
             str(snap_dir),
-            "--context",
-            "none",
             "--clipboard",
             "off",
         ] + context_flags

@@ -73,6 +73,59 @@ def main() -> int:
         print("scribe-tap binary not built", file=sys.stderr)
         return 1
 
+    for mode in ("events", "both", "snapshots"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = b"".join(
+                pack_event(123, 456 + i, EV_KEY, code, value)
+                for i, (code, value) in enumerate([
+                    (KEY_LEFTCTRL, 1), (KEY_A, 1), (KEY_A, 2),
+                    (KEY_A, 0), (KEY_LEFTCTRL, 0), (KEY_B, 1), (KEY_B, 0),
+                ])
+            )
+            result = subprocess.run([
+                str(binary), "--data-dir", str(root), "--clipboard", "off",
+                "--translate", "raw", "--log-mode", mode,
+            ], input=payload, capture_output=True, timeout=5)
+            assert result.returncode == 0, result.stderr.decode()
+            assert result.stdout == payload, "keyboard logging must preserve input frames"
+            records = [json.loads(line) for p in root.rglob("*.jsonl")
+                       for line in p.read_text().splitlines()]
+            keys = [r for r in records if r["event"] in ("press", "release")]
+            if mode in ("both", "snapshots"):
+                snapshots = [r["buffer"] for r in records
+                             if r["event"] == "snapshot" and "buffer" in r]
+                assert snapshots and snapshots[-1] == "b", "releases must not append text"
+            if mode == "snapshots":
+                assert not keys, "snapshot-only mode must omit keyboard events"
+                continue
+            assert [r["event"] for r in keys] == [
+                "press", "press", "press", "release", "release", "press", "release"
+            ], "capture both keyboard edges while retaining legacy press records"
+            assert [r["value"] for r in keys] == [1, 1, 2, 0, 0, 1, 0]
+            assert [r["code"] for r in keys] == [29, 30, 30, 30, 29, 48, 48]
+            assert all(r["input_sec"] == 123 for r in keys)
+            assert [r["input_usec"] for r in keys] == list(range(456, 463))
+            assert all(not r["changed"] for r in keys if r["event"] == "release")
+            replay = subprocess.run([
+                sys.executable, str(repo_root / "tools/replay.py"),
+                "--log-dir", str(root / "logs"), "--snapshot-dir", str(root / "snapshots"),
+                "--mode", "events",
+            ], capture_output=True, text=True, timeout=5)
+            assert replay.returncode == 0, replay.stderr
+            assert "repeat KEY_A" in replay.stdout and "release KEY_A" in replay.stdout
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        log = root / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d") + ".jsonl")
+        log.write_text(json.dumps({"event": "press", "keycode": "KEY_A", "changed": True}) + "\n")
+        replay = subprocess.run([
+            sys.executable, str(repo_root / "tools/replay.py"), "--log-dir", str(root),
+            "--snapshot-dir", str(root), "--mode", "events",
+        ], capture_output=True, text=True, timeout=5)
+        assert replay.returncode == 0, replay.stderr
+        assert "press KEY_A" in replay.stdout, "legacy records remain readable"
+
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         snap_dir = Path(tmp) / "snapshots"
@@ -425,7 +478,9 @@ fi
         assert proc.stdin is not None
 
         send_key(proc.stdin, KEY_LEFTSHIFT, 1)
+        send_key(proc.stdin, KEY_LEFTSHIFT, 2)
         send_key(proc.stdin, KEY_A, 1)
+        send_key(proc.stdin, KEY_A, 2)
         send_key(proc.stdin, KEY_A, 0)
         send_key(proc.stdin, KEY_LEFTSHIFT, 0)
         send_key(proc.stdin, KEY_A, 1)
@@ -440,14 +495,14 @@ fi
         snapshot_files = list(snap_dir.glob("*.txt"))
         assert snapshot_files, "missing snapshots in modifier regression test"
         content = snapshot_files[0].read_text(encoding="utf-8")
-        assert content == "Aa", f"unexpected snapshot content: {content!r}"
+        assert content == "AAa", f"unexpected snapshot content: {content!r}"
         assert all(ord(ch) < 128 for ch in content), content
 
         wait_for(lambda: (log_dir / "2021-01-04.jsonl").exists())
         events = [json.loads(line) for line in (log_dir / "2021-01-04.jsonl").read_text().splitlines()]
         snapshots = [e for e in events if e.get("event") == "snapshot"]
         assert snapshots, "expected snapshot events"
-        assert snapshots[-1]["buffer"] == "Aa", snapshots[-1]
+        assert snapshots[-1]["buffer"] == "AAa", snapshots[-1]
 
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"

@@ -148,7 +148,8 @@ def main() -> None:
         window = ev.get("window") or "unknown"
         key = ev.get("keycode") or "(unknown)"
         marker = "*" if ev.get("changed") else "·"
-        parts = [f"[{ts}] {window}: {marker} {key}"]
+        edge = "repeat" if ev.get("value") == 2 else ev.get("event", "press")
+        parts = [f"[{ts}] {window}: {marker} {edge} {key}"]
         if args.show_clipboard and ev.get("clipboard"):
             clip = ev["clipboard"].replace("\n", "\\n")
             if len(clip) > 80:
@@ -195,7 +196,7 @@ def main() -> None:
                         tail = [
                             ev
                             for ev in events
-                            if ev.get("event") == "press" and event_matches(ev)
+                            if ev.get("event") in {"press", "release"} and event_matches(ev)
                         ][-args.events_tail:]
                         if tail:
                             print("Key events (newest last):")
@@ -226,7 +227,7 @@ def main() -> None:
         trail = [
             ev
             for ev in events
-            if ev.get("event") == "press" and event_matches(ev)
+            if ev.get("event") in {"press", "release"} and event_matches(ev)
         ][-args.events_tail:]
         if trail:
             print("Key events (newest last):")
